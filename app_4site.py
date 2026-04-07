@@ -19,11 +19,22 @@ from io import BytesIO
 load_dotenv()
 
 # Configuración de página
-st.set_page_config(
-    page_title="4SITE - Location Analysis",
-    page_icon="📍",
-    layout="wide"
-)
+# Google Analytics
+GA_MEASUREMENT_ID = "G-WW1XFBQ1PN"
+
+# Inyectar Google Analytics
+ga_script = f"""
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id={GA_MEASUREMENT_ID}"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){{dataLayer.push(arguments);}}
+  gtag('js', new Date());
+  gtag('config', '{GA_MEASUREMENT_ID}');
+</script>
+"""
+
+st.markdown(ga_script, unsafe_allow_html=True)
 
 # Inicializar APIs
 gmaps = googlemaps.Client(key=os.getenv("GOOGLE_API_KEY"))
