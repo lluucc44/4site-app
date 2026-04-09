@@ -1128,6 +1128,19 @@ if mapa_data and mapa_data.get("last_clicked"):
 
 st.markdown("---")
 
+# Detectar si cambió la ubicación (resetear caché)
+ubicacion_actual = direccion_texto if direccion_texto else direccion_mapa
+if 'ubicacion_previa' not in st.session_state:
+    st.session_state.ubicacion_previa = None
+
+if ubicacion_actual and ubicacion_actual != st.session_state.ubicacion_previa:
+    st.session_state.ubicacion_previa = ubicacion_actual
+    # Limpiar caché para forzar actualización
+    if 'cache_demografia' in st.session_state:
+        del st.session_state['cache_demografia']
+    if 'cache_recomendaciones' in st.session_state:
+        del st.session_state['cache_recomendaciones']
+
 # Selector de modo de análisis
 st.markdown(f"### {t['modo_analisis']}")
 
