@@ -1,5 +1,3 @@
-#
-import streamlit as st
 import streamlit as st
 import googlemaps
 import os
@@ -44,14 +42,12 @@ ga_script = f"""
 st.markdown(ga_script, unsafe_allow_html=True)
 
 # APIs
-
-# APIs - usando Streamlit Secrets
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     CLAUDE_API_KEY = st.secrets["CLAUDE_API_KEY"]
 except:
-    st.error("⚠️ API keys no configuradas. Configura los Secrets en Streamlit Cloud.")
-    st.stop()
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
 gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
 claude = Anthropic(api_key=CLAUDE_API_KEY)
@@ -447,6 +443,37 @@ def obtener_demografia_inegi(lat, lng, gmaps):
     demografia["gasto_promedio_mensual"] = int(demografia["ingreso_promedio_mensual"] * 0.8)
     
     return demografia
+
+
+def formatear_densidad(densidad_hab_km2):
+    """Convierte densidad a formato más entendible"""
+    
+    # Personas por manzana típica urbana (100m × 100m = 0.01 km²)
+    personas_manzana = int(densidad_hab_km2 * 0.01)
+    
+    # Clasificación
+    if densidad_hab_km2 < 2000:
+        clasificacion = "Baja"
+        emoji = "📉"
+        descripcion = "Zona suburbana o de baja densidad"
+    elif densidad_hab_km2 < 8000:
+        clasificacion = "Media"
+        emoji = "📊"
+        descripcion = "Zona residencial típica"
+    elif densidad_hab_km2 < 15000:
+        clasificacion = "Alta"
+        emoji = "📈"
+        descripcion = "Zona urbana densamente poblada - Ideal para comercio"
+    else:
+        clasificacion = "Muy Alta"
+        emoji = "🔥"
+        descripcion = "Centro urbano de muy alta densidad"
+    
+    return {
+        "clasificacion": f"{clasificacion} {emoji}",
+        "personas_manzana": personas_manzana,
+        "descripcion": descripcion
+    }
 
 
 def ajustar_score_por_contexto(score_base, tipo_negocio_key, contexto):
@@ -1206,18 +1233,23 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
             
             # Demografía del área (VERSIÓN BÁSICA $99)
             st.markdown("### 📊 Datos Demográficos del Área (500m)")
-            st.info("💡 Datos estimados. Actualiza a PRO ($299) para datos INEGI reales + análisis de ingreso/gasto.")
+            st.info("💡 Datos estimados. Actualiza a PRO ($299) para datos INEGI reales + tamaño de mercado + análisis de ingreso/gasto.")
+            
+            densidad_info = formatear_densidad(demografia['densidad_hab_km2'])
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Población", f"{demografia['poblacion_estimada']:,}")
+                st.metric("Población", f"{demografia['poblacion_estimada']:,} hab")
             
             with col2:
                 st.metric("NSE Predominante", demografia['nse_predominante'])
             
             with col3:
-                st.metric("Densidad", f"{demografia['densidad_hab_km2']:,} hab/km²")
+                st.metric("Densidad", densidad_info['clasificacion'])
+                st.caption(f"~{densidad_info['personas_manzana']} personas/manzana")
+            
+            st.caption(f"ℹ️ {densidad_info['descripcion']}")
             
             # Generar PDF
             pdf_buffer = generar_pdf_simple(ubicacion, score, analisis, competidores, idioma, lat, lng, "validar", tipo_negocio=tipo_negocio_seleccionado)
@@ -1280,18 +1312,23 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
             
             # Demografía del área (VERSIÓN BÁSICA $99)
             st.markdown("### 📊 Datos Demográficos del Área (500m)")
-            st.info("💡 Datos estimados. Actualiza a PRO ($299) para datos INEGI reales + análisis de ingreso/gasto.")
+            st.info("💡 Datos estimados. Actualiza a PRO ($299) para datos INEGI reales + tamaño de mercado + análisis de ingreso/gasto.")
+            
+            densidad_info = formatear_densidad(demografia['densidad_hab_km2'])
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Población", f"{demografia['poblacion_estimada']:,}")
+                st.metric("Población", f"{demografia['poblacion_estimada']:,} hab")
             
             with col2:
                 st.metric("NSE Predominante", demografia['nse_predominante'])
             
             with col3:
-                st.metric("Densidad", f"{demografia['densidad_hab_km2']:,} hab/km²")
+                st.metric("Densidad", densidad_info['clasificacion'])
+                st.caption(f"~{densidad_info['personas_manzana']} personas/manzana")
+            
+            st.caption(f"ℹ️ {densidad_info['descripcion']}")
             
             st.markdown("---")
             
