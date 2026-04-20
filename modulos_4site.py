@@ -407,16 +407,22 @@ def generar_reporte_trafico(tipo_zona, tipo_negocio_key, densidad_hab_km2, idiom
     horas_pico       = identificar_horas_pico(trafico_horario, top_n=3)
     dia_pico         = DIAS_SEMANA[trafico_semanal.index(max(trafico_semanal))]
     dia_bajo         = DIAS_SEMANA[trafico_semanal.index(min(trafico_semanal))]
-    flujo_promedio   = int(sum(trafico_horario) / 24)
+    # Calcular flujo promedio solo en horas activas (7h-22h) — las madrugadas
+    # distorsionan el promedio hacia abajo aunque las horas pico sean altas
+    horas_activas    = trafico_horario[7:23]
+    flujo_promedio   = int(sum(horas_activas) / len(horas_activas))
+    # También calcular el pico máximo del día
+    flujo_pico       = max(trafico_horario)
 
     return {
-        "trafico_horario":  trafico_horario,   # lista 24 valores
-        "trafico_semanal":  trafico_semanal,   # lista 7 valores
+        "trafico_horario":  trafico_horario,
+        "trafico_semanal":  trafico_semanal,
         "horas_pico":       horas_pico,
         "dia_pico":         dia_pico,
         "dia_bajo":         dia_bajo,
         "flujo_promedio":   flujo_promedio,
-        "nivel_general":    "Alto" if flujo_promedio >= 60 else "Medio" if flujo_promedio >= 40 else "Bajo",
+        "flujo_pico":       flujo_pico,
+        "nivel_general":    "Alto" if flujo_promedio >= 65 else "Medio" if flujo_promedio >= 45 else "Bajo",
     }
 
 
