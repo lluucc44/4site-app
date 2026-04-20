@@ -958,7 +958,9 @@ def nivel_score(score, idioma="es"):
 
 
 def recomendar_tipos_negocio(lat, lng, direccion):
-    contexto  = detectar_contexto_ubicacion(lat, lng, direccion)
+    # Usar cafe_casual como tipo base para detección vial inicial
+    # Se re-detectará con el top1 después de calcular recomendaciones
+    contexto  = detectar_contexto_ubicacion(lat, lng, direccion, "cafe_casual")
     demografia = obtener_demografia(lat, lng)
     recomendaciones = []
     for tipo_key, tipo_info in TIPOS_NEGOCIO.items():
@@ -2396,6 +2398,48 @@ def generar_pdf_premium(ubicacion, score, desglose, analisis, competidores,
         fontSize=8.5, textColor=colors.HexColor('#444'), spaceAfter=6,
         backColor=colors.HexColor('#F5F8FF'), borderPad=6)))
 
+    # ── P3b: ANÁLISIS VIAL ──
+    av_prem = contexto.get("analisis_vial") if contexto else None
+    if av_prem and av_prem.get("descripcion"):
+        story.append(PageBreak())
+        story.append(Paragraph("🛣️ Análisis de Vialidad", s["h2"]))
+        ajuste_prem = av_prem.get("ajuste_score", 0)
+        color_prem  = '#4CAF50' if ajuste_prem > 0 else '#F44336' if ajuste_prem < -5 else '#FF9800'
+        dep_prem = {"alto":"Negocio de paso (crítico)","medio":"Negocio mixto",
+                    "bajo":"Negocio de destino"}.get(av_prem.get("dependencia_paso","medio"),"")
+        vial_rows_prem = [
+            ["Tipo de vialidad:",       av_prem.get("badge","")],
+            ["Dependencia al tráfico:", dep_prem],
+            ["Impacto en score:",       f"{'+'if ajuste_prem>=0 else ''}{ajuste_prem} puntos"],
+            ["Análisis:",               av_prem.get("descripcion","")],
+        ]
+        tbl_vial_prem = Table(vial_rows_prem, colWidths=[1.8*inch, 3.7*inch])
+        tbl_vial_prem.setStyle(TableStyle([
+            ('FONTNAME',  (0,0),(0,-1),'Helvetica-Bold'),
+            ('FONTSIZE',  (0,0),(-1,-1),9),
+            ('TEXTCOLOR', (0,0),(0,-1),colors.HexColor('#0047AB')),
+            ('TEXTCOLOR', (1,2),(1,2),colors.HexColor(color_prem)),
+            ('FONTNAME',  (1,2),(1,2),'Helvetica-Bold'),
+            ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#F0F4FF'),colors.white,
+                                             colors.HexColor('#F0F4FF'),colors.white]),
+            ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#DDDDDD')),
+            ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+        ]))
+        story.append(tbl_vial_prem)
+        # Narrativa interpretativa vial
+        _tipo_nom_vp = tipo_info_efectivo.get('nombre', tipo_info.get('nombre',''))
+        if not _tipo_nom_vp and recomendaciones:
+            _tipo_nom_vp = recomendaciones[0].get('nombre','')
+        narr_vial_prem = generar_narrativa_seccion("mapa", {
+            "tipo_vialidad":    av_prem.get("tipo_vialidad",""),
+            "ajuste_score":     ajuste_prem,
+            "descripcion":      av_prem.get("descripcion",""),
+            "dependencia_paso": av_prem.get("dependencia_paso","medio"),
+        }, _tipo_nom_vp, idioma)
+        for el in _bloque_narrativa_pdf(narr_vial_prem, s):
+            story.append(el)
+
     # ── P4: COMPETIDORES ──
     story.append(PageBreak())
     story.append(Paragraph(t["competencia_titulo"], s["h2"]))
@@ -2802,13 +2846,12 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
 
     with st.spinner("🔍 Analizando ubicación..."):
 
-        # Obtener contexto y demografía
-        contexto   = detectar_contexto_ubicacion(lat, lng, ubicacion)
+        # Obtener demografía primero (no depende del tipo de negocio)
         demografia = obtener_demografia(lat, lng, ubicacion)
 
         if modo == "validar":
             competidores = buscar_competencia_por_tipo(lat, lng, tipo_negocio_seleccionado)
-            # Re-detectar contexto con tipo de negocio para motor vial preciso
+            # Detectar contexto con tipo de negocio para motor vial preciso
             contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_seleccionado)
             score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado)
             score_ctx   = ajustar_score_por_contexto(score_base, tipo_negocio_seleccionado, contexto)
@@ -2823,6 +2866,9 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
             score        = recomendaciones[0]["score"] if recomendaciones else 0
             desglose     = recomendaciones[0]["desglose"] if recomendaciones else {}
             tipo_negocio_top1 = recomendaciones[0]["tipo_key"] if recomendaciones else None
+            # Re-detectar contexto con el tipo de negocio top1 para motor vial preciso
+            if tipo_negocio_top1:
+                contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_top1)
             analisis     = generar_analisis_claude(ubicacion, [], idioma, "recomendar",
                                                    recomendaciones=recomendaciones)
 
