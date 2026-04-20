@@ -653,34 +653,77 @@ def detectar_contexto_ubicacion(lat, lng, direccion, tipo_negocio_key="cafe_prem
     dl = direccion.lower()
 
     # ── Análisis vial mejorado ──
+    av = None
     try:
         av = analizar_vialidad(lat, lng, direccion, tipo_negocio_key)
-        contexto["analisis_vial"] = av
-        # Agregar badge de vialidad
-        contexto["badges"].append(av["badge"])
-        # Actualizar tipo_zona según vialidad
-        if av["tipo_vialidad"] == "principal":
-            contexto.update({"tipo_zona": "paso", "trafico": "alto"})
-        elif av["tipo_vialidad"] == "avenida":
+    except Exception as e_vial:
+        pass  # Se maneja abajo con fallback
+
+    # Si el motor vial no pudo detectar o retornó tipo desconocido,
+    # intentar con reverse geocoding de Google
+    if av is None or av.get("tipo_vialidad") == "desconocida":
+        try:
+            result = gmaps.reverse_geocode((lat, lng))
+            if result:
+                for comp in result[0].get('address_components', []):
+                    if 'route' in comp.get('types', []):
+                        nombre_ruta = comp.get('long_name', '')
+                        tipo_detectado = clasificar_vialidad_por_nombre(nombre_ruta)
+                        if tipo_detectado != "desconocida":
+                            ajuste, desc, _ = calcular_factor_vial(
+                                tipo_detectado, None, tipo_negocio_key)
+                            badge_vial = (f"🛣️ {nombre_ruta}" if tipo_detectado == "principal"
+                                         else f"🚦 {nombre_ruta}" if tipo_detectado == "avenida"
+                                         else f"🏘️ {nombre_ruta}")
+                            dep = ("alto" if tipo_negocio_key in NEGOCIOS_PASO["alto"]
+                                   else "medio" if tipo_negocio_key in NEGOCIOS_PASO["medio"]
+                                   else "bajo")
+                            av = {
+                                "tipo_vialidad":    tipo_detectado,
+                                "vialidad_cercana": None,
+                                "ajuste_score":     ajuste,
+                                "descripcion":      desc,
+                                "badge":            badge_vial,
+                                "dependencia_paso": dep,
+                            }
+                            break
+        except:
+            pass
+
+    # Si aún no tenemos análisis vial, crear uno básico por nombre de dirección
+    if av is None or av.get("tipo_vialidad") == "desconocida":
+        tipo_fallback = clasificar_vialidad_por_nombre(direccion)
+        if tipo_fallback == "desconocida":
+            # Default: avenida si no se puede determinar
+            tipo_fallback = "avenida"
+        ajuste_fb, desc_fb, _ = calcular_factor_vial(tipo_fallback, None, tipo_negocio_key)
+        dep_fb = ("alto" if tipo_negocio_key in NEGOCIOS_PASO["alto"]
+                  else "medio" if tipo_negocio_key in NEGOCIOS_PASO["medio"] else "bajo")
+        badge_fb = {"principal": "🛣️ Vialidad principal",
+                    "avenida": "🚦 Avenida secundaria",
+                    "local": "🏘️ Calle local"}.get(tipo_fallback, "📍 Vialidad")
+        av = {
+            "tipo_vialidad":    tipo_fallback,
+            "vialidad_cercana": None,
+            "ajuste_score":     ajuste_fb,
+            "descripcion":      desc_fb if desc_fb else f"Vialidad tipo {tipo_fallback} detectada",
+            "badge":            badge_fb,
+            "dependencia_paso": dep_fb,
+        }
+
+    # Guardar en contexto y actualizar tipo_zona
+    contexto["analisis_vial"] = av
+    contexto["badges"].append(av["badge"])
+    if av["tipo_vialidad"] == "principal":
+        contexto.update({"tipo_zona": "paso", "trafico": "alto"})
+    elif av["tipo_vialidad"] == "avenida":
+        contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
+    elif av["tipo_vialidad"] == "local":
+        vc = av.get("vialidad_cercana")
+        if vc and vc.get("distancia_m", 999) <= 80:
             contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
-        elif av["tipo_vialidad"] == "local":
-            # Si hay vialidad principal muy cerca, es zona mixta
-            vc = av.get("vialidad_cercana")
-            if vc and vc.get("distancia_m", 999) <= 80:
-                contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
-            else:
-                contexto.update({"tipo_zona": "residencial", "trafico": "bajo"})
-    except:
-        # Fallback al sistema original si falla el motor vial
-        avenidas = ["calzada","autopista","periférico","circuito","anillo","viaducto","eje",
-                    "insurgentes","reforma","constituyentes","tecnológico","paseo","boulevard"]
-        if any(av in dl for av in avenidas):
-            contexto.update({"tipo_zona": "paso", "trafico": "alto"})
-            contexto["badges"].append("🚗 Alto tráfico vehicular")
-        elif "calle" in dl or "privada" in dl or "manzana" in dl:
+        else:
             contexto.update({"tipo_zona": "residencial", "trafico": "bajo"})
-        elif "avenida" in dl or "av." in dl:
-            contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
     headers = {"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_API_KEY,
@@ -1112,10 +1155,10 @@ DEMOGRAFÍA DEL ÁREA:
 - Características: {', '.join(badges) if badges else 'No detectadas'}
 
 ANÁLISIS DE VIALIDAD:
-- Tipo de vialidad: {contexto.get('analisis_vial', {}).get('badge', 'No detectada') if contexto else 'No detectada'}
-- Impacto en score: {'+' if (contexto or {}).get('analisis_vial', {}).get('ajuste_score', 0) >= 0 else ''}{(contexto or {}).get('analisis_vial', {}).get('ajuste_score', 0)} puntos
-- Interpretación: {(contexto or {}).get('analisis_vial', {}).get('descripcion', 'No disponible')}
-- Dependencia del negocio al tráfico de paso: {(contexto or {}).get('analisis_vial', {}).get('dependencia_paso', 'medio')}"""
+- Tipo de vialidad: {((contexto or {}).get('analisis_vial') or {}).get('badge', 'No detectada')}
+- Impacto en score: {'+' if ((contexto or {}).get('analisis_vial') or {}).get('ajuste_score', 0) >= 0 else ''}{((contexto or {}).get('analisis_vial') or {}).get('ajuste_score', 0)} puntos
+- Análisis: {((contexto or {}).get('analisis_vial') or {}).get('descripcion', 'No disponible')}
+- Dependencia al tráfico de paso: {((contexto or {}).get('analisis_vial') or {}).get('dependencia_paso', 'medio')}"""
 
     datos_pro = ""
     if trafico_data:
@@ -1177,8 +1220,11 @@ IMPORTANTE: Todas las referencias son EXCLUSIVAMENTE sobre la ubicación: "{nomb
 **📊 Potencial comercial:**
 [2 líneas sobre mercado y ventas estimadas para ESTA ubicación]
 
+**🛣️ Factibilidad vial:**
+[2 líneas explicando el tipo de vialidad detectado, su impacto en puntos, y qué significa específicamente para ESTE tipo de negocio — si es negocio de paso o destino, si la vialidad favorece o perjudica la captación de clientes]
+
 **🎯 VEREDICTO: [PROCEDER ✅ / PRECAUCIÓN 🟡 / NO PROCEDER ❌]**
-[2-3 líneas de justificación integrando TODOS los datos de esta ubicación]
+[2-3 líneas de justificación integrando TODOS los datos incluyendo el factor vial]
 
 **Nivel de confianza: [ALTO / MEDIO / BAJO]** — [motivo en 1 línea]"""
     else:
@@ -1192,16 +1238,16 @@ IMPORTANTE: Todo el análisis es sobre: "{nombre_ub_principal}"
 [2-3 líneas sobre el potencial de esta ubicación específica]
 
 **✅ Factores a favor:**
-- [factor 1]
+- [factor 1 — menciona la vialidad si es favorable]
 - [factor 2]
 - [factor 3]
 
 **⚠️ Factores de riesgo:**
-- [riesgo 1]
+- [riesgo 1 — menciona la vialidad si es desfavorable]
 - [riesgo 2]
 
-**🛣️ Factor vialidad:**
-[1 línea sobre si la ubicación está en vialidad favorable o desfavorable para este negocio]
+**🛣️ Factibilidad vial:**
+[2 líneas explicando el tipo de vialidad, su impacto en puntos y qué significa para este tipo de negocio específico]
 
 **🎯 VEREDICTO: [PROCEDER ✅ / PRECAUCIÓN 🟡 / NO PROCEDER ❌]**
 [1-2 líneas de justificación incluyendo el factor vial]
@@ -1806,7 +1852,11 @@ def generar_pdf_basic(ubicacion, score, desglose, analisis, competidores,
 
     # Badges
     if contexto and contexto.get("badges"):
-        for badge in contexto["badges"]:
+        # Filtrar badges de vialidad — ya se muestran en el bloque de análisis vial
+        badges_vial = {"🛣️", "🚦", "🏘️", "📍"}
+        badges_filtrados = [b for b in contexto["badges"]
+                           if not any(b.startswith(v) for v in badges_vial)]
+        for badge in badges_filtrados:
             story.append(Paragraph(f"  {badge}", s["normal"]))
         story.append(Spacer(1, 0.1*inch))
 
@@ -2089,7 +2139,11 @@ def generar_pdf_pro(ubicacion, score, desglose, analisis, competidores,
             "🎓 Escuela/Universidad":     "Institución educativa — alto flujo estudiantil y docente",
             "🚌 Transporte público":      "Estación de transporte — alta accesibilidad peatonal",
         }
-        for badge in contexto["badges"]:
+        # Filtrar badges de vialidad — ya se muestran en el bloque de análisis vial
+        badges_vial = {"🛣️", "🚦", "🏘️", "📍"}
+        badges_filtrados = [b for b in contexto["badges"]
+                           if not any(b.startswith(v) for v in badges_vial)]
+        for badge in badges_filtrados:
             desc = BADGE_DESCRIPCIONES.get(badge, "Característica detectada en la zona")
             story.append(Paragraph(f"  {badge}  —  {desc}",
                 ParagraphStyle('badge_item', parent=s["base"]['Normal'],
@@ -2939,7 +2993,11 @@ if "resultados" in st.session_state:
             "🚌 Transporte público":      "Estación de transporte cercana — alta accesibilidad peatonal",
         }
         chips_html = "<div style='display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;'>"
-        for badge in contexto["badges"]:
+        # Filtrar badges de vialidad — ya se muestran en el bloque de análisis vial
+        badges_vial = {"🛣️", "🚦", "🏘️", "📍"}
+        badges_filtrados = [b for b in contexto["badges"]
+                           if not any(b.startswith(v) for v in badges_vial)]
+        for badge in badges_filtrados:
             desc = BADGE_DESC.get(badge, "Característica detectada en la zona")
             chips_html += f"""
             <div title='{desc}' style='
