@@ -414,21 +414,273 @@ def geocodificar_inversa(lat, lng):
     return f"{lat:.6f}, {lng:.6f}"
 
 # ============================================
+# MOTOR VIAL — Clasificación de tipo de vialidad
+# ============================================
+
+# Clasificación de negocios por dependencia de tráfico de paso
+NEGOCIOS_PASO = {
+    "alto":  ["cafe_premium","cafe_casual","comida_rapida","tienda_conveniencia",
+              "panaderia","farmacia","servicios"],
+    "medio": ["restaurante_casual","bar","libreria"],
+    "bajo":  ["restaurante_fino","gimnasio_boutique","gimnasio_regular",
+              "yoga_wellness","guarderia"],
+}
+
+# Palabras clave de vialidades principales en México
+KEYWORDS_VIALIDAD_PRINCIPAL = [
+    "autopista","periférico","periferico","circuito","anillo","viaducto",
+    "eje vial","eje central","boulevard","blvd","calzada","paseo",
+    "insurgentes","reforma","constituyentes","revolución","revolucion",
+    "tecnológico","tecnologico","universitaria","churubusco","tlalpan",
+    "zaragoza","canal nacional","canal del norte","indios verdes",
+    "lázaro cárdenas","lazaro cardenas","adolfo lópez mateos","adolfo lopez mateos",
+]
+
+KEYWORDS_AVENIDA_SECUNDARIA = [
+    "avenida","av.","av ","avenue",
+]
+
+KEYWORDS_CALLE_LOCAL = [
+    "calle","cjon","callejón","callejon","privada","cerrada","andador",
+    "manzana","mza","priv.",
+]
+
+
+def clasificar_vialidad_por_nombre(direccion):
+    """
+    Clasifica el tipo de vialidad basándose en el nombre de la dirección.
+    Retorna: 'principal', 'avenida', 'local'
+    """
+    dl = direccion.lower()
+
+    # Primero verificar vialidades principales conocidas
+    for kw in KEYWORDS_VIALIDAD_PRINCIPAL:
+        if kw in dl:
+            return "principal"
+
+    # Luego avenidas secundarias
+    for kw in KEYWORDS_AVENIDA_SECUNDARIA:
+        if kw in dl:
+            return "avenida"
+
+    # Calles locales
+    for kw in KEYWORDS_CALLE_LOCAL:
+        if kw in dl:
+            return "local"
+
+    return "desconocida"
+
+
+def buscar_vialidad_principal_cercana(lat, lng, radio_metros=150):
+    """
+    Busca si hay una vialidad principal en el radio especificado.
+    Usa Google Roads API (snap to roads) o reverse geocoding de puntos cercanos.
+    Retorna: {'distancia_m': X, 'nombre': 'Av. Tecnológico', 'tipo': 'principal'}
+    """
+    # Estrategia: hacer reverse geocoding en 4 puntos alrededor de la ubicación
+    # a diferentes distancias para detectar vialidades cercanas
+    import math
+
+    puntos_busqueda = []
+    for distancia in [50, 100, 150]:
+        for angulo in [0, 90, 180, 270]:  # Norte, Este, Sur, Oeste
+            rad = math.radians(angulo)
+            # Convertir metros a grados aproximados
+            dlat = (distancia / 111320) * math.cos(rad)
+            dlng = (distancia / (111320 * math.cos(math.radians(lat)))) * math.sin(rad)
+            puntos_busqueda.append((lat + dlat, lng + dlng, distancia))
+
+    vialidades_encontradas = []
+
+    for p_lat, p_lng, dist in puntos_busqueda:
+        try:
+            result = gmaps.reverse_geocode((p_lat, p_lng))
+            if result:
+                for comp in result[0].get('address_components', []):
+                    tipos_comp = comp.get('types', [])
+                    nombre = comp.get('long_name', '')
+                    if 'route' in tipos_comp:
+                        tipo_vial = clasificar_vialidad_por_nombre(nombre)
+                        if tipo_vial in ['principal', 'avenida']:
+                            vialidades_encontradas.append({
+                                'nombre': nombre,
+                                'tipo': tipo_vial,
+                                'distancia_m': dist
+                            })
+        except:
+            pass
+
+    if not vialidades_encontradas:
+        return None
+
+    # Retornar la más cercana y más importante
+    vialidades_encontradas.sort(
+        key=lambda x: (0 if x['tipo'] == 'principal' else 1, x['distancia_m'])
+    )
+    return vialidades_encontradas[0]
+
+
+def calcular_factor_vial(tipo_vialidad_propia, vialidad_cercana, tipo_negocio_key):
+    """
+    Calcula el ajuste de score basado en la vialidad.
+    tipo_vialidad_propia: 'principal', 'avenida', 'local', 'desconocida'
+    vialidad_cercana: dict con 'tipo', 'distancia_m', 'nombre' o None
+    tipo_negocio_key: clave del tipo de negocio
+    """
+    # Determinar dependencia del negocio al tráfico de paso
+    if tipo_negocio_key in NEGOCIOS_PASO["alto"]:
+        dep = "alto"
+    elif tipo_negocio_key in NEGOCIOS_PASO["medio"]:
+        dep = "medio"
+    else:
+        dep = "bajo"
+
+    ajuste = 0
+    descripcion = ""
+
+    # ── Análisis de la vialidad propia ──
+    if tipo_vialidad_propia == "principal":
+        if dep == "alto":
+            ajuste += 25
+            descripcion = "✅ Sobre vialidad principal — máximo tráfico de paso para este tipo de negocio"
+        elif dep == "medio":
+            ajuste += 12
+            descripcion = "✅ Sobre vialidad principal — buena visibilidad y accesibilidad"
+        else:  # bajo
+            ajuste += 5
+            descripcion = "ℹ️ Sobre vialidad principal — accesibilidad alta aunque no es crítica para este negocio"
+
+    elif tipo_vialidad_propia == "avenida":
+        if dep == "alto":
+            ajuste += 12
+            descripcion = "🟡 Sobre avenida secundaria — flujo moderado para negocio de paso"
+        elif dep == "medio":
+            ajuste += 8
+            descripcion = "✅ Sobre avenida secundaria — buena accesibilidad"
+        else:
+            ajuste += 5
+            descripcion = "✅ Sobre avenida — accesibilidad adecuada para este negocio"
+
+    elif tipo_vialidad_propia == "local":
+        if dep == "alto":
+            ajuste -= 15
+            descripcion = "⚠️ Calle local — flujo peatonal bajo, crítico para negocio de paso"
+        elif dep == "medio":
+            ajuste -= 5
+            descripcion = "🟡 Calle local — acceso limitado, considera visibilidad"
+        else:  # bajo — destino
+            ajuste += 8
+            descripcion = "✅ Calle local/residencial — ventaja para negocio de destino (menos ruido, más tranquilo)"
+
+    # ── Bonus/Penalización por vialidad principal cercana ──
+    if vialidad_cercana and tipo_vialidad_propia in ["local", "avenida"]:
+        dist = vialidad_cercana.get('distancia_m', 999)
+        nombre_vial = vialidad_cercana.get('nombre', '')
+        tipo_cercana = vialidad_cercana.get('tipo', '')
+
+        if tipo_cercana == "principal":
+            if dist <= 80:
+                if dep == "alto":
+                    ajuste += 15
+                    descripcion += f" | ✅ A {dist}m de {nombre_vial} — captación de tráfico alta"
+                elif dep == "medio":
+                    ajuste += 8
+                    descripcion += f" | ✅ A {dist}m de {nombre_vial}"
+            elif dist <= 150:
+                if dep == "alto":
+                    ajuste += 8
+                    descripcion += f" | 🟡 A {dist}m de {nombre_vial} — captación de tráfico parcial"
+                elif dep == "medio":
+                    ajuste += 4
+                    descripcion += f" | 🟡 A {dist}m de {nombre_vial}"
+            else:
+                if dep == "alto":
+                    ajuste -= 5
+                    descripcion += f" | ⚠️ {nombre_vial} a {dist}m — distancia reduce captación significativamente"
+
+    return ajuste, descripcion, tipo_vialidad_propia
+
+
+def analizar_vialidad(lat, lng, direccion, tipo_negocio_key="cafe_premium"):
+    """
+    Función principal — analiza la vialidad y retorna el análisis completo.
+    """
+    tipo_propio = clasificar_vialidad_por_nombre(direccion)
+    vialidad_cercana = None
+
+    # Solo buscar vialidad cercana si estamos en calle local o desconocida
+    if tipo_propio in ["local", "desconocida"]:
+        try:
+            vialidad_cercana = buscar_vialidad_principal_cercana(lat, lng, radio_metros=150)
+        except:
+            pass
+
+    ajuste, descripcion, tipo_final = calcular_factor_vial(
+        tipo_propio, vialidad_cercana, tipo_negocio_key
+    )
+
+    # Badge para UI
+    if tipo_propio == "principal":
+        badge = "🛣️ Vialidad principal"
+    elif tipo_propio == "avenida":
+        badge = "🚦 Avenida secundaria"
+    elif tipo_propio == "local":
+        if vialidad_cercana and vialidad_cercana.get('distancia_m', 999) <= 100:
+            badge = f"📍 Calle local (cerca de {vialidad_cercana.get('nombre','')})"
+        else:
+            badge = "🏘️ Calle local"
+    else:
+        badge = "📍 Vialidad detectada"
+
+    return {
+        "tipo_vialidad":     tipo_propio,
+        "vialidad_cercana":  vialidad_cercana,
+        "ajuste_score":      ajuste,
+        "descripcion":       descripcion,
+        "badge":             badge,
+        "dependencia_paso":  "alto" if tipo_negocio_key in NEGOCIOS_PASO["alto"] else
+                             "medio" if tipo_negocio_key in NEGOCIOS_PASO["medio"] else "bajo",
+    }
+
+
+# ============================================
 # FUNCIONES DE CONTEXTO Y DEMOGRAFÍA
 # ============================================
 
-def detectar_contexto_ubicacion(lat, lng, direccion):
-    contexto = {"tipo_zona": "residencial", "pois_cercanos": [], "trafico": "medio", "badges": []}
+def detectar_contexto_ubicacion(lat, lng, direccion, tipo_negocio_key="cafe_premium"):
+    contexto = {"tipo_zona": "residencial", "pois_cercanos": [], "trafico": "medio",
+                "badges": [], "analisis_vial": None}
     dl = direccion.lower()
 
-    avenidas = ["calzada","autopista","periférico","circuito","anillo","viaducto","eje","insurgentes","reforma","constituyentes"]
-    if any(av in dl for av in avenidas):
-        contexto.update({"tipo_zona": "paso", "trafico": "alto"})
-        contexto["badges"].append("🚗 Alto tráfico vehicular")
-    elif "calle" in dl or "privada" in dl:
-        contexto.update({"tipo_zona": "residencial", "trafico": "bajo"})
-    elif "avenida" in dl or "av." in dl:
-        contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
+    # ── Análisis vial mejorado ──
+    try:
+        av = analizar_vialidad(lat, lng, direccion, tipo_negocio_key)
+        contexto["analisis_vial"] = av
+        # Agregar badge de vialidad
+        contexto["badges"].append(av["badge"])
+        # Actualizar tipo_zona según vialidad
+        if av["tipo_vialidad"] == "principal":
+            contexto.update({"tipo_zona": "paso", "trafico": "alto"})
+        elif av["tipo_vialidad"] == "avenida":
+            contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
+        elif av["tipo_vialidad"] == "local":
+            # Si hay vialidad principal muy cerca, es zona mixta
+            vc = av.get("vialidad_cercana")
+            if vc and vc.get("distancia_m", 999) <= 80:
+                contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
+            else:
+                contexto.update({"tipo_zona": "residencial", "trafico": "bajo"})
+    except:
+        # Fallback al sistema original si falla el motor vial
+        avenidas = ["calzada","autopista","periférico","circuito","anillo","viaducto","eje",
+                    "insurgentes","reforma","constituyentes","tecnológico","paseo","boulevard"]
+        if any(av in dl for av in avenidas):
+            contexto.update({"tipo_zona": "paso", "trafico": "alto"})
+            contexto["badges"].append("🚗 Alto tráfico vehicular")
+        elif "calle" in dl or "privada" in dl or "manzana" in dl:
+            contexto.update({"tipo_zona": "residencial", "trafico": "bajo"})
+        elif "avenida" in dl or "av." in dl:
+            contexto.update({"tipo_zona": "comercial", "trafico": "medio"})
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
     headers = {"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_API_KEY,
@@ -626,6 +878,8 @@ def ajustar_score_por_contexto(score_base, tipo_key, contexto):
     score = score_base
     zona  = contexto["tipo_zona"]
     pois  = [p["tipo"] for p in contexto["pois_cercanos"]]
+
+    # ── Ajuste por POIs y tipo de zona (lógica original) ──
     if "cafe" in tipo_key:
         if zona == "paso" or "gasolinera" in pois: score += 15
         elif zona == "comercial": score += 10
@@ -660,6 +914,13 @@ def ajustar_score_por_contexto(score_base, tipo_key, contexto):
         if zona == "residencial": score += 15
         elif zona == "comercial": score += 5
         elif zona == "paso":      score -= 10
+
+    # ── Ajuste por análisis vial (nuevo motor) ──
+    analisis_vial = contexto.get("analisis_vial")
+    if analisis_vial:
+        ajuste_vial = analisis_vial.get("ajuste_score", 0)
+        score += ajuste_vial
+
     return max(0, min(100, int(score)))
 
 
@@ -1704,6 +1965,33 @@ def generar_pdf_pro(ubicacion, score, desglose, analisis, competidores,
     else:
         _score_block(story, score, desglose, tier, t, s, idioma)
 
+    # Análisis vial en PDF
+    av_pdf = contexto.get("analisis_vial") if contexto else None
+    if av_pdf and av_pdf.get("descripcion"):
+        story.append(Spacer(1, 0.1*inch))
+        ajuste_v = av_pdf.get("ajuste_score", 0)
+        color_v  = '#4CAF50' if ajuste_v > 0 else '#F44336' if ajuste_v < -5 else '#FF9800'
+        vial_rows = [
+            ["Tipo de vialidad:", av_pdf.get("badge","")],
+            ["Impacto en score:", f"{'+'if ajuste_v>=0 else ''}{ajuste_v} puntos"],
+            ["Análisis:", av_pdf.get("descripcion","")],
+        ]
+        tbl_vial = Table(vial_rows, colWidths=[1.5*inch, 4*inch])
+        tbl_vial.setStyle(TableStyle([
+            ('FONTNAME',  (0,0),(0,-1),'Helvetica-Bold'),
+            ('FONTSIZE',  (0,0),(-1,-1),9),
+            ('TEXTCOLOR', (0,0),(0,-1),colors.HexColor('#0047AB')),
+            ('TEXTCOLOR', (1,1),(1,1),colors.HexColor(color_v)),
+            ('FONTNAME',  (1,1),(1,1),'Helvetica-Bold'),
+            ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#F0F4FF'),colors.white,colors.HexColor('#F0F4FF')]),
+            ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#DDDDDD')),
+            ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+        ]))
+        story.append(Paragraph("🛣️ Análisis de Vialidad:", s["h2"]))
+        story.append(tbl_vial)
+        story.append(Spacer(1, 0.1*inch))
+
     # Características de la zona / Generadores de tráfico
     if contexto and contexto.get("badges"):
         story.append(Spacer(1, 0.12*inch))
@@ -2440,6 +2728,8 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
 
         if modo == "validar":
             competidores = buscar_competencia_por_tipo(lat, lng, tipo_negocio_seleccionado)
+            # Re-detectar contexto con tipo de negocio para motor vial preciso
+            contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_seleccionado)
             score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado)
             score_ctx   = ajustar_score_por_contexto(score_base, tipo_negocio_seleccionado, contexto)
             score       = ajustar_score_por_demografia(score_ctx, tipo_negocio_seleccionado, demografia)
@@ -2493,6 +2783,23 @@ if "resultados" in st.session_state:
     st.markdown(f"## {t['titulo_analisis']}")
     if modo == "validar":
         st.markdown(f"### {TIPOS_NEGOCIO[tipo_negocio_seleccionado]['nombre']}")
+
+    # ── ANÁLISIS VIAL — visible en todos los tiers ──
+    av_data = contexto.get("analisis_vial")
+    if av_data and av_data.get("descripcion"):
+        dep_label = {"alto": "negocio de paso", "medio": "negocio mixto", "bajo": "negocio de destino"}.get(
+            av_data.get("dependencia_paso","medio"), "negocio")
+        color_vial = "#4CAF50" if av_data["ajuste_score"] > 0 else "#F44336" if av_data["ajuste_score"] < -5 else "#FFC107"
+        st.markdown(f"""
+        <div style='background:{color_vial}11; border-left:4px solid {color_vial};
+             padding:10px 14px; border-radius:0 8px 8px 0; margin:8px 0;'>
+            <b style='color:{color_vial};'>{av_data["badge"]}</b>
+            &nbsp;·&nbsp; <span style='font-size:12px; color:#555;'>
+            Impacto en score: <b style='color:{color_vial};'>
+            {"+" if av_data["ajuste_score"] >= 0 else ""}{av_data["ajuste_score"]} pts</b>
+            ({dep_label})</span><br>
+            <span style='font-size:12px; color:#444;'>{av_data["descripcion"]}</span>
+        </div>""", unsafe_allow_html=True)
 
     # Características de la zona (Basic+)
     if tier_info["muestra_badges"] and contexto.get("badges"):
