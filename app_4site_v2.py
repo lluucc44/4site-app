@@ -1107,7 +1107,13 @@ DEMOGRAFÍA DEL ÁREA:
 - Densidad urbana: {densidad:,} hab/km²
 - Crecimiento anual zona: {tasa_crec:.2f}%
 - Tipo de zona: {tipo_zona}
-- Características: {', '.join(badges) if badges else 'No detectadas'}"""
+- Características: {', '.join(badges) if badges else 'No detectadas'}
+
+ANÁLISIS DE VIALIDAD:
+- Tipo de vialidad: {contexto.get('analisis_vial', {}).get('badge', 'No detectada') if contexto else 'No detectada'}
+- Impacto en score: {'+' if (contexto or {}).get('analisis_vial', {}).get('ajuste_score', 0) >= 0 else ''}{(contexto or {}).get('analisis_vial', {}).get('ajuste_score', 0)} puntos
+- Interpretación: {(contexto or {}).get('analisis_vial', {}).get('descripcion', 'No disponible')}
+- Dependencia del negocio al tráfico de paso: {(contexto or {}).get('analisis_vial', {}).get('dependencia_paso', 'medio')}"""
 
     datos_pro = ""
     if trafico_data:
@@ -1192,8 +1198,11 @@ IMPORTANTE: Todo el análisis es sobre: "{nombre_ub_principal}"
 - [riesgo 1]
 - [riesgo 2]
 
+**🛣️ Factor vialidad:**
+[1 línea sobre si la ubicación está en vialidad favorable o desfavorable para este negocio]
+
 **🎯 VEREDICTO: [PROCEDER ✅ / PRECAUCIÓN 🟡 / NO PROCEDER ❌]**
-[1-2 líneas de justificación basada en los datos disponibles]
+[1-2 líneas de justificación incluyendo el factor vial]
 
 *Actualiza al plan {'Básico ($99)' if tier_key == 'free' else 'PRO ($299)'} para incluir tráfico, mercado y forecast en tu recomendación.*"""
 
@@ -1675,7 +1684,23 @@ def generar_pdf_free(ubicacion, score, desglose, analisis, competidores,
     if mapa:
         story.append(Paragraph("📍 Ubicación", s["h2"]))
         story.append(RLImage(mapa, width=4.5*inch, height=3*inch))
-        story.append(Spacer(1, 0.15*inch))
+        story.append(Spacer(1, 0.1*inch))
+
+    # Análisis vial básico en Free
+    av_f = contexto.get("analisis_vial") if contexto else None
+    if av_f:
+        ajuste_f = av_f.get("ajuste_score", 0)
+        color_f = '#4CAF50' if ajuste_f > 0 else '#F44336' if ajuste_f < -5 else '#FF9800'
+        story.append(Paragraph(
+            f"🛣️ Vialidad: {av_f.get('badge','')}  |  "
+            f"Impacto: <b><font color='{color_f}'>{'+'if ajuste_f>=0 else ''}{ajuste_f} pts</font></b>",
+            ParagraphStyle('vial_f', parent=s["base"]['Normal'], fontSize=9,
+                           textColor=colors.HexColor('#333333'), spaceAfter=4)))
+        story.append(Paragraph(
+            "🔒 Análisis vial completo con narrativa interpretativa disponible en plan Básico ($99)",
+            ParagraphStyle('vial_lock', parent=s["base"]['Normal'], fontSize=8,
+                           textColor=colors.HexColor('#888888'), fontName='Helvetica-Oblique')))
+        story.append(Spacer(1, 0.1*inch))
 
     # Competidores — solo 3 filas
     if competidores:
@@ -1783,13 +1808,55 @@ def generar_pdf_basic(ubicacion, score, desglose, analisis, competidores,
             story.append(Paragraph(f"  {badge}", s["normal"]))
         story.append(Spacer(1, 0.1*inch))
 
-    # ── P2: Mapa ──
+    # ── P2: Mapa + Análisis Vial ──
     story.append(PageBreak())
     story.append(Paragraph("📍 Mapa de Ubicación", s["h2"]))
     mapa = generar_mapa_estatico(lat, lng, competidores=None, con_competidores=False)
     if mapa:
         story.append(RLImage(mapa, width=5*inch, height=3.3*inch))
     story.append(Paragraph("Radio de análisis: 500m", s["small"]))
+
+    # Tabla análisis vial con narrativa
+    av_b = contexto.get("analisis_vial") if contexto else None
+    if av_b and av_b.get("descripcion"):
+        story.append(Spacer(1, 0.15*inch))
+        story.append(Paragraph("🛣️ Análisis de Vialidad", s["h2"]))
+        ajuste_b = av_b.get("ajuste_score", 0)
+        color_b  = '#4CAF50' if ajuste_b > 0 else '#F44336' if ajuste_b < -5 else '#FF9800'
+        dep_b = {"alto":"Negocio de paso (crítico)","medio":"Negocio mixto","bajo":"Negocio de destino"}.get(
+            av_b.get("dependencia_paso","medio"),"")
+        vial_rows_b = [
+            ["Tipo de vialidad:",  av_b.get("badge","")],
+            ["Dependencia al tráfico:", dep_b],
+            ["Impacto en score:", f"{'+'if ajuste_b>=0 else ''}{ajuste_b} puntos"],
+            ["Análisis:", av_b.get("descripcion","")],
+        ]
+        tbl_b = Table(vial_rows_b, colWidths=[1.8*inch, 3.7*inch])
+        tbl_b.setStyle(TableStyle([
+            ('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),
+            ('FONTSIZE',(0,0),(-1,-1),9),
+            ('TEXTCOLOR',(0,0),(0,-1),colors.HexColor('#0047AB')),
+            ('TEXTCOLOR',(1,2),(1,2),colors.HexColor(color_b)),
+            ('FONTNAME',(1,2),(1,2),'Helvetica-Bold'),
+            ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#F0F4FF'),colors.white,
+                                              colors.HexColor('#F0F4FF'),colors.white]),
+            ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#DDDDDD')),
+            ('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+        ]))
+        story.append(tbl_b)
+        # Narrativa interpretativa vial
+        tipo_nom_b = TIPOS_NEGOCIO.get(tipo_negocio, {}).get('nombre','') if tipo_negocio else (
+            recomendaciones[0]['nombre'] if recomendaciones else '')
+        narr_vial_b = generar_narrativa_seccion("mapa", {
+            "tipo_vialidad": av_b.get("tipo_vialidad",""),
+            "ajuste_score": ajuste_b,
+            "descripcion": av_b.get("descripcion",""),
+            "dependencia_paso": av_b.get("dependencia_paso","medio"),
+        }, tipo_nom_b, idioma)
+        for el in _bloque_narrativa_pdf(narr_vial_b, s):
+            story.append(el)
+
     story.append(Spacer(1, 0.2*inch))
 
     # ── P3: Competidores (10 filas) — movido, Recomendación va al final ──
@@ -1990,7 +2057,20 @@ def generar_pdf_pro(ubicacion, score, desglose, analisis, competidores,
         ]))
         story.append(Paragraph("🛣️ Análisis de Vialidad:", s["h2"]))
         story.append(tbl_vial)
-        story.append(Spacer(1, 0.1*inch))
+        # Narrativa interpretativa vial para PRO/PREMIUM
+        _tipo_nom_vial = (tipo_info_efectivo.get('nombre','') if 'tipo_info_efectivo' in dir()
+                          else tipo_info.get('nombre',''))
+        if not _tipo_nom_vial and recomendaciones:
+            _tipo_nom_vial = recomendaciones[0].get('nombre','')
+        narr_vial_p = generar_narrativa_seccion("mapa", {
+            "tipo_vialidad": av_pdf.get("tipo_vialidad",""),
+            "ajuste_score": av_pdf.get("ajuste_score", 0),
+            "descripcion": av_pdf.get("descripcion",""),
+            "dependencia_paso": av_pdf.get("dependencia_paso","medio"),
+        }, _tipo_nom_vial, idioma)
+        for el in _bloque_narrativa_pdf(narr_vial_p, s):
+            story.append(el)
+        story.append(Spacer(1, 0.05*inch))
 
     # Características de la zona / Generadores de tráfico
     if contexto and contexto.get("badges"):
