@@ -82,19 +82,30 @@ st.markdown(ga_script, unsafe_allow_html=True)
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     CLAUDE_API_KEY = st.secrets["CLAUDE_API_KEY"]
-    CODIGOS_BASIC  = set(st.secrets.get("CODIGOS_BASIC", "").split(","))
-    CODIGOS_PRO    = set(st.secrets.get("CODIGOS_PRO", "").split(","))
-    CODIGOS_PREMIUM= set(st.secrets.get("CODIGOS_PREMIUM", "").split(","))
 except:
-    GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY", "")
-    CLAUDE_API_KEY  = os.getenv("CLAUDE_API_KEY", "")
-    # Limpiar espacios y convertir a mayúsculas para evitar errores de formato
-    def _leer_codigos(var, default):
-        raw = os.getenv(var, default)
-        return set(c.strip().upper() for c in raw.split(",") if c.strip())
-    CODIGOS_BASIC   = _leer_codigos("CODIGOS_BASIC",   "BASIC-TEST")
-    CODIGOS_PRO     = _leer_codigos("CODIGOS_PRO",     "PRO-TEST")
-    CODIGOS_PREMIUM = _leer_codigos("CODIGOS_PREMIUM", "PREM-TEST")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+    CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
+
+# Google Sheet donde el webhook guarda los códigos
+SHEET_ID = "107pcvu1mgINU5AqJhiHLeBMQF3U8FqNhDTxVvPqNSsg"
+SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+
+def cargar_codigos_sheet():
+    """Lee códigos activos desde Google Sheets. Retorna dict {codigo: tier}"""
+    try:
+        import pandas as pd
+        df = pd.read_csv(SHEET_CSV_URL)
+        df.columns = [c.strip().lower() for c in df.columns]
+        codigos = {}
+        for _, row in df.iterrows():
+            cod   = str(row.get("codigo", "")).strip().upper()
+            tier  = str(row.get("tier", "")).strip().lower()
+            estado = str(row.get("estado", "")).strip().lower()
+            if cod and tier and estado == "activo":
+                codigos[cod] = tier
+        return codigos
+    except Exception as e:
+        return {}
 
 gmaps  = googlemaps.Client(key=GOOGLE_API_KEY)
 claude = Anthropic(api_key=CLAUDE_API_KEY)
@@ -211,7 +222,7 @@ def codigo_ya_usado(codigo):
 
 def validar_codigo(codigo_ingresado):
     """
-    Valida código y retorna el tier correspondiente.
+    Valida código contra Google Sheets y retorna el tier correspondiente.
     Códigos de prueba (TEST) nunca se marcan como usados.
     """
     codigo = codigo_ingresado.strip().upper()
@@ -223,14 +234,28 @@ def validar_codigo(codigo_ingresado):
 
     # Verificar si ya fue usado (solo para códigos reales)
     if not es_test and codigo_ya_usado(codigo):
-        return "usado"  # Código válido pero ya utilizado
+        return "usado"
 
-    if codigo in CODIGOS_PREMIUM:
-        return "premium"
-    if codigo in CODIGOS_PRO:
-        return "pro"
-    if codigo in CODIGOS_BASIC:
+    # Códigos de prueba hardcodeados como fallback
+    if codigo == "BASIC-TEST":
         return "basic"
+    if codigo == "PRO-TEST":
+        return "pro"
+    if codigo == "PREM-TEST":
+        return "premium"
+
+    # Leer de Google Sheets
+    codigos_sheet = cargar_codigos_sheet()
+    if codigo in codigos_sheet:
+        tier = codigos_sheet[codigo]
+        # Normalizar nombre del tier
+        if tier in ["basico", "basic"]:
+            return "basic"
+        if tier in ["pro"]:
+            return "pro"
+        if tier in ["premium"]:
+            return "premium"
+
     return None  # Código inválido
 
 def activar_codigo(codigo):
