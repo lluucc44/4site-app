@@ -9,3 +9,7 @@ streamlit-folium>=0.18.0
 matplotlib>=3.8.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
+pandas>=2.0.0
+pypdf>=4.0.0
+python-pptx>=0.6.21
+gspread>=5.0.0
