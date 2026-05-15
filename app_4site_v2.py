@@ -2063,6 +2063,65 @@ def _bloque_narrativa_pdf(narrativa, s):
 # MAPA ESTÁTICO
 # ============================================
 
+def _plaza_block_pdf(story, contexto, s):
+    """Inserta seccion de plaza comercial en el PDF si aplica."""
+    _ip = (contexto or {}).get("info_plaza", {})
+    if not _ip or not _ip.get("tipo_plaza"):
+        return
+    _pl_tipo  = _ip["tipo_plaza"]
+    _pl_label = "Mall / Plaza Cerrada" if _pl_tipo == "mall" else "Strip Center / Plaza Abierta"
+    _pl_icono = "🏬" if _pl_tipo == "mall" else "🏪"
+    _pl_nota  = _ip.get("nota", "").replace("\n", "  |  ")
+    _pl_roi   = _ip.get("ajuste_roi_pct", 0)
+    _pl_zona  = _ip.get("zona_mall", "")
+
+    story.append(Spacer(1, 0.1*inch))
+    story.extend(_seccion_pdf("Ubicacion en Plaza Comercial", _pl_icono, s))
+
+    zona_labels = {
+        "food_court":         "Food Court / zona de comida",
+        "moda_accesorios":    "Moda / accesorios / lifestyle",
+        "servicios":          "Servicios (salud, belleza, etc.)",
+        "ancla_principal":    "Cerca de ancla principal (Liverpool, Walmart, Cine)",
+        "planta_baja_entrada":"Planta baja / entrada principal",
+        "piso_superior":      "Piso superior / menor trafico",
+    }
+    plaza_rows = [["Tipo de plaza:", f"{_pl_label}"]]
+    if _pl_zona and _pl_tipo == "mall":
+        plaza_rows.append(["Zona en mall:", zona_labels.get(_pl_zona, _pl_zona)])
+    if _pl_roi > 0:
+        plaza_rows.append(["Impacto ROI:", f"Reduccion estimada -{_pl_roi}% vs local en calle por renta de plaza"])
+    if _pl_nota:
+        plaza_rows.append(["Consideraciones:", _pl_nota[:350]])
+
+    tbl_plaza = Table(plaza_rows, colWidths=[1.6*inch, 3.9*inch])
+    tbl_plaza.setStyle(TableStyle([
+        ('FONTNAME',  (0,0),(0,-1), 'Helvetica-Bold'),
+        ('FONTSIZE',  (0,0),(-1,-1), 9),
+        ('TEXTCOLOR', (0,0),(0,-1), colors.HexColor('#6B6B6B')),
+        ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#FFF8F0'), colors.white]),
+        ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#DDDDDD')),
+        ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+        ('VALIGN',(0,0),(-1,-1),'TOP'),
+    ]))
+    story.append(tbl_plaza)
+    story.append(Spacer(1, 0.06*inch))
+    _warn_style = ParagraphStyle('plaza_warn_pdf', parent=s["base"]['Normal'],
+        fontSize=8.5, textColor=colors.HexColor('#7B4500'),
+        backColor=colors.HexColor('#FFF3CD'),
+        borderPad=6, leading=13, leftIndent=4, rightIndent=4)
+    if _pl_tipo == "mall":
+        story.append(Paragraph(
+            "El score ya incluye ajuste por trafico captivo y renta de mall. "
+            "La Recomendacion Final considera las implicaciones de estar en un mall cerrado.",
+            _warn_style))
+    else:
+        story.append(Paragraph(
+            "El score ya incluye ajuste por visibilidad de calle y tienda ancla. "
+            "La Recomendacion Final considera el impacto de la tienda ancla del strip center.",
+            _warn_style))
+
+
 def _render_recomendacion_pdf(story, analisis, s):
     """Renderiza el bloque de Recomendación Final en el PDF con estilo consistente"""
     story.extend(_seccion_pdf("Recomendación Final", "✅", s))
@@ -4097,6 +4156,7 @@ def generar_pdf_basic(ubicacion, score, desglose, analisis, competidores,
 
     # ── P6: Recomendación Final ──
     story.append(PageBreak())
+    _plaza_block_pdf(story, contexto, s)
     _render_recomendacion_pdf(story, analisis, s)
 
     # ── P7: CTA ──
@@ -4547,6 +4607,7 @@ def generar_pdf_pro(ubicacion, score, desglose, analisis, competidores,
 
     # ── P9: Recomendación Final ──
     story.append(PageBreak())
+    _plaza_block_pdf(story, contexto, s)
     _render_recomendacion_pdf(story, analisis, s)
 
 
@@ -4974,6 +5035,7 @@ def generar_pdf_premium(ubicacion, score, desglose, analisis, competidores,
 
     # ── P10: Recomendación Final ──
     story.append(PageBreak())
+    _plaza_block_pdf(story, contexto, s)
     _render_recomendacion_pdf(story, analisis, s)
 
     # ── P11: CTA ──
@@ -6364,7 +6426,7 @@ if "resultados" in st.session_state:
             if pptx_buf:
                 _dir_clean = ubicacion[:25].replace(" ","_").replace(",","").replace(".","")
                 _fname = f"4site_{tier_key}_{_dir_clean}.pptx"
-                tier_nombres = {"free":"Gratis","basico":"Básico $99","pro":"PRO $299",
+                tier_nombres = {"free":"Gratis","basico":"Basico $99","pro":"PRO $299",
                                 "premium":"PREMIUM $999","premium2":"ZONA ELITE $1,500"}
                 st.download_button(
                     label=f"⬇️  Descargar presentación PowerPoint",
