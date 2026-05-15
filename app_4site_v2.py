@@ -5168,8 +5168,7 @@ if tipo_plaza == "mall":
             }.get(x, x),
             key="nivel_renta_mall",
         )
-    st.session_state["zona_mall"] = zona_mall
-    st.session_state["nivel_renta_mall"] = nivel_renta_mall
+    # zona_mall y nivel_renta_mall ya están en session_state via sus widget keys
 
 elif tipo_plaza == "strip_center":
     st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
@@ -5205,7 +5204,7 @@ elif tipo_plaza == "strip_center":
             st.markdown(f"""<div style='background:#1A1A1A; border-left:3px solid #1A76D2;
                 border-radius:6px; padding:8px 12px; font-size:11px; color:#AAAAAA; margin-top:22px;'>
                 {_tips_ancla[ancla_strip]}</div>""", unsafe_allow_html=True)
-    st.session_state["ancla_strip"] = ancla_strip
+    # ancla_strip ya está en session_state via su widget key
 
 # Guardar tipo_plaza en session_state para usarlo en el análisis
 st.session_state["tipo_plaza"] = tipo_plaza
@@ -5336,9 +5335,9 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
 
     # Recuperar datos de tipo de plaza del session_state
     _tipo_plaza  = st.session_state.get("tipo_plaza", None)
-    _zona_mall   = st.session_state.get("zona_mall", "no_especificado")
+    _zona_mall   = st.session_state.get("zona_mall_select", "no_especificado")
     _renta_mall  = st.session_state.get("nivel_renta_mall", "desconocido")
-    _ancla_strip = st.session_state.get("ancla_strip", "sin_ancla")
+    _ancla_strip = st.session_state.get("ancla_strip_select", "sin_ancla")
 
     with st.spinner("🔍 Analizando ubicación..."):
 
