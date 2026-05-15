@@ -6408,13 +6408,25 @@ if "resultados" in st.session_state:
             _analisis_dl = (st.session_state.get("_diagnostico_pptx") or
                             diagnostico if 'diagnostico' in dir() and diagnostico else analisis)
 
+            # Sanitizar recomendaciones — asegurar tipos numéricos correctos
+            # para evitar 'int vs str' en el generador PPTX
+            _recom_dl = []
+            for _r in (recomendaciones or []):
+                _recom_dl.append({
+                    **_r,
+                    "score":        float(_r.get("score") or 0),
+                    "inversion_min": int(_r.get("inversion_min") or 0),
+                    "inversion_max": int(_r.get("inversion_max") or 0),
+                    "num_competidores": int(_r.get("num_competidores") or 0),
+                })
+
             pptx_buf = _generar_pptx_por_tier(
                 tier_key,
                 ubicacion=ubicacion, score=score, desglose=desglose,
                 analisis=_analisis_dl, competidores=competidores,
                 idioma=idioma, lat=lat, lng=lng, modo=modo,
                 tipo_negocio=_tipo_nombre_dl or tipo_negocio_seleccionado or "",
-                recomendaciones=recomendaciones,
+                recomendaciones=_recom_dl,
                 demografia=demografia, contexto=contexto,
                 ticket_data=_ticket_dl,
                 trafico_data=st.session_state.get("_trafico_data_pptx"),
