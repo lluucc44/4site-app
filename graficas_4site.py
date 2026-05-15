@@ -2,7 +2,7 @@
 graficas_4site.py
 =================
 Genera gráficas como imágenes PNG en memoria (BytesIO) para embeber en PDFs.
-Usa matplotlib con estilo 4SITE (azul #0047AB + cyan #00D4D4).
+Usa matplotlib con estilo 4SITE (negro #1A1A1A + dorado #BB944F).
 """
 
 from io import BytesIO
@@ -13,26 +13,28 @@ import matplotlib.patches as mpatches
 import matplotlib.gridspec as gridspec
 import numpy as np
 
-# Paleta 4SITE
-C_BLUE   = "#0047AB"
-C_CYAN   = "#00D4D4"
-C_GREEN  = "#4CAF50"
-C_YELLOW = "#FFC107"
-C_RED    = "#F44336"
-C_GRAY   = "#9E9E9E"
-C_BG     = "#F8FAFF"
-C_DARK   = "#1A1A2E"
+# Paleta oficial 4SITE — negro/dorado/gris
+C_BLUE   = "#BB944F"   # dorado (reemplaza azul)
+C_CYAN   = "#1A1A1A"   # negro (reemplaza cyan)
+C_GREEN  = "#27AE60"
+C_YELLOW = "#BB944F"   # dorado
+C_RED    = "#E74C3C"
+C_GRAY   = "#6B6B6B"
+C_BG     = "#F5F5F5"
+C_DARK   = "#1A1A1A"
+C_DORADO = "#BB944F"
+C_NEGRO  = "#1A1A1A"
 
 plt.rcParams.update({
     'font.family':      'DejaVu Sans',
     'axes.facecolor':   C_BG,
-    'figure.facecolor': 'white',
+    'figure.facecolor': C_BG,
     'axes.spines.top':  False,
     'axes.spines.right':False,
     'axes.spines.left': False,
     'axes.grid':        True,
-    'grid.alpha':       0.3,
-    'grid.color':       '#CCCCCC',
+    'grid.alpha':       0.2,
+    'grid.color':       '#DDDDDD',
     'text.color':       C_DARK,
 })
 
@@ -58,7 +60,7 @@ def grafica_score_gauge(score, nivel, ancho=4, alto=2.2):
 
     # Color según score
     if score >= 70:   color = C_GREEN
-    elif score >= 50: color = C_YELLOW
+    elif score >= 50: color = C_DORADO
     else:             color = C_RED
 
     # Arco de fondo (gris)
@@ -124,7 +126,7 @@ def grafica_desglose_score(desglose, ancho=6, alto=2.5):
         ax.text(0.26, y + 0.02, nombre, ha='right', va='center', fontsize=8.5,
                 fontweight='bold', color=C_DARK)
         ax.text(0.895, y + 0.02, f"{valor}/100", ha='left', va='center',
-                fontsize=9, fontweight='bold', color=C_BLUE)
+                fontsize=9, fontweight='bold', color=C_DORADO)
         ax.text(0.28, y - 0.11, desc, ha='left', va='top', fontsize=7,
                 color='#888888')
         ax.text(0.895, y - 0.06, f"Peso: {peso}", ha='left', va='center',
@@ -133,7 +135,7 @@ def grafica_desglose_score(desglose, ancho=6, alto=2.5):
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_title("¿Cómo se calcula el score?", fontsize=10, fontweight='bold',
-                 color=C_BLUE, pad=8)
+                 color=C_DORADO, pad=8)
     return _guardar(fig)
 
 
@@ -160,19 +162,19 @@ def grafica_trafico_horario(trafico_horario, tipo_negocio_nombre="", ancho=7, al
     for i, (bar, val) in enumerate(zip(bars, trafico_horario)):
         if val >= max_val * 0.90:
             ax.text(bar.get_x() + bar.get_width()/2, val + 1.5,
-                    '▲', ha='center', fontsize=7, color=C_BLUE, fontweight='bold')
+                    '▲', ha='center', fontsize=7, color=C_DORADO, fontweight='bold')
 
     ax.set_xticks(horas)
     ax.set_xticklabels([f"{h}h" for h in horas], fontsize=7, rotation=45)
     ax.set_ylabel("Flujo relativo (%)", fontsize=9)
     ax.set_ylim(0, 115)
     ax.set_title(f"Perfil de Tráfico Estimado — {tipo_negocio_nombre}",
-                 fontsize=10, fontweight='bold', color=C_BLUE)
+                 fontsize=10, fontweight='bold', color=C_DORADO)
 
     # Leyenda
     patches = [
-        mpatches.Patch(color=C_BLUE,   label='Muy alto (≥75%)'),
-        mpatches.Patch(color=C_CYAN,   label='Alto (50-74%)'),
+        mpatches.Patch(color=C_DORADO,   label='Muy alto (≥75%)'),
+        mpatches.Patch(color=C_NEGRO,   label='Alto (50-74%)'),
         mpatches.Patch(color='#90CAF9',label='Medio (30-49%)'),
         mpatches.Patch(color='#E0E0E0',label='Bajo (<30%)'),
     ]
@@ -208,7 +210,7 @@ def grafica_trafico_semanal(trafico_semanal, ancho=6, alto=1.6):
 
     ax.set_ylim(0, 115)
     ax.set_ylabel("Flujo (%)", fontsize=9)
-    ax.set_title("Flujo por Día de la Semana", fontsize=10, fontweight='bold', color=C_BLUE)
+    ax.set_title("Flujo por Día de la Semana", fontsize=10, fontweight='bold', color=C_DORADO)
     ax.spines['bottom'].set_visible(True)
     ax.spines['left'].set_visible(False)
     fig.tight_layout()
@@ -224,9 +226,9 @@ def grafica_forecast(forecast_data, ancho=7, alto=3.5):
 
     meses = list(range(1, 13))
     escenarios_cfg = [
-        ("pesimista", C_RED,   "--", "Pesimista (-40%)"),
-        ("base",      C_BLUE,  "-",  "Base (esperado)"),
-        ("optimista", C_GREEN, "-.", "Optimista (+50%)"),
+        ("pesimista", C_RED,    "--", "Pesimista (-40%)"),
+        ("base",      C_DORADO, "-",  "Base (esperado)"),
+        ("optimista", C_GREEN,  "-.", "Optimista (+50%)"),
     ]
 
     for key, color, ls, label in escenarios_cfg:
@@ -244,7 +246,7 @@ def grafica_forecast(forecast_data, ancho=7, alto=3.5):
     ax.set_ylabel("Ventas mensuales (miles MXN)", fontsize=9)
     ax.set_xlabel("Mes de operación", fontsize=9)
     ax.set_title("Forecast de Ventas — 12 Meses (3 Escenarios)", fontsize=10,
-                 fontweight='bold', color=C_BLUE)
+                 fontweight='bold', color=C_DORADO)
     ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
     ax.set_xlim(0.5, 13.5)
 
@@ -276,7 +278,7 @@ def grafica_mercado_donut(mercado_data, ancho=5, alto=3.2):
 
     # Centro
     ax.text(0, 0.08, f"{captura_pct:.0f}%", ha='center', va='center',
-            fontsize=24, fontweight='bold', color=C_BLUE)
+            fontsize=24, fontweight='bold', color=C_DORADO)
     ax.text(0, -0.22, "captura\nestimada", ha='center', va='center',
             fontsize=9, color='#888888')
 
@@ -286,12 +288,12 @@ def grafica_mercado_donut(mercado_data, ancho=5, alto=3.2):
             ha='left', fontsize=9, fontweight='bold', color=C_DARK)
     ax.text(1.1, -0.05, "Tu captura:", ha='left', fontsize=8, color='#555555')
     ax.text(1.1, -0.25, f"${mercado_data['mercado_captura_mensual']/1000:.0f}K/mes",
-            ha='left', fontsize=9, fontweight='bold', color=C_BLUE)
+            ha='left', fontsize=9, fontweight='bold', color=C_DORADO)
     ax.text(1.1, -0.50, f"~{mercado_data['clientes_dia_estimados']} clientes/día",
-            ha='left', fontsize=8, color=C_CYAN, fontweight='bold')
+            ha='left', fontsize=8, color=C_NEGRO, fontweight='bold')
 
     ax.set_title("Tamaño de Mercado Potencial (500m radio)",
-                 fontsize=10, fontweight='bold', color=C_BLUE, pad=10)
+                 fontsize=10, fontweight='bold', color=C_DORADO, pad=10)
     ax.set_xlim(-1.1, 2.2)
     return _guardar(fig)
 
@@ -336,9 +338,9 @@ def grafica_roi_dashboard(roi_data, forecast_data, ancho=7, alto=3):
 
     inversion = roi_data["inversion_min"]
     ax_rec.fill_between(meses, [u/1000 for u in utilidad_acum],
-                         alpha=0.25, color=C_BLUE, label='Utilidad acumulada')
+                         alpha=0.25, color=C_DORADO, label='Utilidad acumulada')
     ax_rec.plot(meses, [u/1000 for u in utilidad_acum],
-                color=C_BLUE, linewidth=2)
+                color=C_DORADO, linewidth=2)
     ax_rec.axhline(y=inversion/1000, color=C_RED, linestyle='--',
                    linewidth=1.5, label=f'Inversión (${inversion/1000:.0f}K)')
 
@@ -354,7 +356,7 @@ def grafica_roi_dashboard(roi_data, forecast_data, ancho=7, alto=3):
     ax_rec.set_xticklabels([f"M{m}" for m in meses], fontsize=7)
     ax_rec.set_ylabel("Miles MXN", fontsize=8)
     ax_rec.set_title("Curva de Recuperación de Inversión", fontsize=9,
-                     fontweight='bold', color=C_BLUE)
+                     fontweight='bold', color=C_DORADO)
     ax_rec.legend(fontsize=7, loc='upper left')
     ax_rec.spines['bottom'].set_visible(True)
     ax_rec.spines['left'].set_visible(False)
@@ -386,7 +388,7 @@ def grafica_demografia(datos_inegi, ancho=6, alto=2.8):
         at.set_fontsize(8)
         at.set_fontweight('bold')
     ax1.set_title("Distribución de Edad", fontsize=9,
-                  fontweight='bold', color=C_BLUE)
+                  fontweight='bold', color=C_DORADO)
 
     # NSE visual
     nse_orden = ["A", "A/B", "B", "B/C+", "C+", "C", "C/D+", "D+", "D/E"]
@@ -401,7 +403,7 @@ def grafica_demografia(datos_inegi, ancho=6, alto=2.8):
                     edgecolor='white', linewidth=0.5)
     ax2.set_xlim(0, 130)
     ax2.set_xlabel("", fontsize=0)
-    ax2.set_title("NSE Predominante", fontsize=9, fontweight='bold', color=C_BLUE)
+    ax2.set_title("NSE Predominante", fontsize=9, fontweight='bold', color=C_DORADO)
 
     # Flecha al NSE actual
     idx = nse_orden.index(nse_actual)
@@ -414,7 +416,7 @@ def grafica_demografia(datos_inegi, ancho=6, alto=2.8):
     ax2.set_xticks([])
 
     fig.suptitle("Perfil Demográfico del Área (500m)",
-                 fontsize=10, fontweight='bold', color=C_BLUE, y=1.02)
+                 fontsize=10, fontweight='bold', color=C_DORADO, y=1.02)
     fig.tight_layout()
     return _guardar(fig)
 
@@ -463,7 +465,7 @@ def grafica_comparativa(ubicaciones_data, ancho=8, alto=4):
     ax_bar.set_ylim(0, 120)
     ax_bar.set_ylabel("Score (0-100)", fontsize=9)
     ax_bar.set_title("Comparativa de Scores", fontsize=10,
-                     fontweight='bold', color=C_BLUE)
+                     fontweight='bold', color=C_DORADO)
     ax_bar.legend(fontsize=8)
     ax_bar.spines['left'].set_visible(False)
 
@@ -498,7 +500,7 @@ def grafica_comparativa(ubicaciones_data, ancho=8, alto=4):
     ax_radar.set_yticks([25, 50, 75, 100])
     ax_radar.set_yticklabels(["25", "50", "75", "100"], fontsize=6)
     ax_radar.set_title("Radar Comparativo", fontsize=10,
-                       fontweight='bold', color=C_BLUE, pad=15)
+                       fontweight='bold', color=C_DORADO, pad=15)
     ax_radar.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1), fontsize=8)
 
     fig.tight_layout()
@@ -508,6 +510,96 @@ def grafica_comparativa(ubicaciones_data, ancho=8, alto=4):
 # ─────────────────────────────────────────────────────────────────
 # DASHBOARD PREMIUM — una sola imagen con todos los KPIs
 # ─────────────────────────────────────────────────────────────────
+
+def grafica_edad_genero(demografia: dict, tipo_negocio_nombre: str = "") -> BytesIO:
+    """
+    Pirámide de grupos de edad + donut de género.
+    Colores 4SITE: dorado #BB944F para clientes potenciales, gris #6B6B6B para otros.
+    """
+    dem = demografia or {}
+    dist_edad   = dem.get("distribucion_edad",   {"0-17":25,"18-35":33,"36-55":27,"56+":15})
+    dist_genero = dem.get("distribucion_genero", {"hombres":49,"mujeres":51})
+
+    grupos  = ["0–17", "18–35", "36–55", "56+"]
+    keys_e  = ["0-17", "18-35", "36-55", "56+"]
+    valores = [float(dist_edad.get(k, 0)) for k in keys_e]
+    hombres = float(dist_genero.get("hombres", 49))
+    mujeres = float(dist_genero.get("mujeres", 51))
+
+    # Colores: dorado para grupos potenciales según tipo de negocio
+    tipo_lower = (tipo_negocio_nombre or "").lower()
+    if any(x in tipo_lower for x in ["café","cafetería","restaurante","gym","yoga"]):
+        activos = {"18-35","36-55"}
+    elif any(x in tipo_lower for x in ["acabado","persiana","piso","ferretería","ferreteria"]):
+        activos = {"36-55","56+"}
+    else:
+        activos = {"18-35","36-55"}
+
+    colores_b = [C_DORADO if k in activos else "#CCCCCC" for k in keys_e]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 3.4),
+                                   facecolor=C_BG,
+                                   gridspec_kw={"width_ratios": [1.8, 1]})
+    fig.subplots_adjust(wspace=0.4, top=0.82, bottom=0.22)
+
+    # ── Barras horizontales ──
+    bars = ax1.barh(grupos, valores, color=colores_b, height=0.52,
+                    edgecolor="white", linewidth=1.2)
+    for bar, val in zip(bars, valores):
+        ax1.text(bar.get_width() + 0.8, bar.get_y() + bar.get_height()/2,
+                 f"{val:.0f}%", va="center", ha="left",
+                 fontsize=9.5, fontweight="bold", color=C_DARK)
+
+    ax1.set_facecolor(C_BG)
+    ax1.set_xlim(0, max(valores) + 14)
+    ax1.set_xlabel("% de la población", fontsize=8, color=C_GRAY)
+    ax1.set_title("Distribución por grupos de edad", fontsize=10,
+                  fontweight="bold", color=C_DARK, pad=6, loc="left")
+    ax1.spines[["bottom"]].set_color("#DDDDDD")
+    ax1.tick_params(colors=C_GRAY, labelsize=9, length=0)
+    ax1.grid(axis="x", color="#EEEEEE", linewidth=0.5)
+    ax1.set_axisbelow(True)
+
+    leyenda_bars = [
+        mpatches.Patch(color=C_DORADO, label="Clientes potenciales directos"),
+        mpatches.Patch(color="#CCCCCC", label="Otros grupos"),
+    ]
+    ax1.legend(handles=leyenda_bars, loc="lower center",
+               bbox_to_anchor=(0.5, -0.30), ncol=2,
+               fontsize=8, frameon=False, labelcolor=C_GRAY)
+
+    # ── Donut género ──
+    ax2.set_facecolor(C_BG)
+    wedges, _ = ax2.pie(
+        [hombres, mujeres],
+        colors=[C_NEGRO, C_DORADO],
+        startangle=90, counterclock=False,
+        wedgeprops={"width": 0.58, "edgecolor": "white", "linewidth": 2.5}
+    )
+    ax2.text(0, 0.12, f"{hombres:.0f}%", ha="center", va="center",
+             fontsize=11, fontweight="bold", color="white")
+    ax2.text(0, -0.12, f"{mujeres:.0f}%", ha="center", va="center",
+             fontsize=11, fontweight="bold", color=C_DARK)
+    leyenda_gen = [
+        mpatches.Patch(color=C_NEGRO,  label=f"Hombres {hombres:.0f}%"),
+        mpatches.Patch(color=C_DORADO, label=f"Mujeres {mujeres:.0f}%"),
+    ]
+    ax2.legend(handles=leyenda_gen, loc="lower center",
+               bbox_to_anchor=(0.5, -0.22), ncol=2,
+               fontsize=8.5, frameon=False, labelcolor=C_GRAY)
+    ax2.set_title("Género", fontsize=10, fontweight="bold", color=C_DARK, pad=6)
+
+    nse = dem.get("nse_predominante", "")
+    fig.suptitle(
+        f"Perfil demográfico{' · NSE ' + nse if nse else ''}",
+        fontsize=10, fontweight="bold", color=C_DARK, x=0.02, ha="left"
+    )
+    ax1.text(1.0, -0.18, "Fuente: Estimación basada en zona",
+             transform=ax1.transAxes, fontsize=7, color=C_GRAY, ha="right")
+
+    return _guardar(fig)
+
+
 def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
                                roi_data, trafico_data, datos_inegi, ancho=8.5, alto=11,
                                titulo_negocio=""):
@@ -525,14 +617,14 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
     ax_header.add_patch(mpatches.FancyBboxPatch(
         (0, 0), 1, 1, transform=ax_header.transAxes,
         boxstyle="round,pad=0.02",
-        facecolor=C_BLUE, edgecolor='none', clip_on=False))
+        facecolor=C_DORADO, edgecolor='none', clip_on=False))
     ax_header.text(0.5, 0.70, "4SITE — DASHBOARD EJECUTIVO",
                    ha='center', va='center', fontsize=14,
                    fontweight='bold', color='white', transform=ax_header.transAxes)
     subtitulo = titulo_negocio if titulo_negocio else "Análisis completo de viabilidad comercial"
     ax_header.text(0.5, 0.28, subtitulo,
                    ha='center', va='center', fontsize=10,
-                   color=C_CYAN, fontweight='bold', transform=ax_header.transAxes)
+                   color=C_NEGRO, fontweight='bold', transform=ax_header.transAxes)
 
     # ── Fila 1: Score + 3 KPIs ──
     kpis_top = [
@@ -565,7 +657,7 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
     ax_tr.set_xticks(horas)
     ax_tr.set_xticklabels([f"{h}h" for h in horas], fontsize=6, rotation=45)
     ax_tr.set_ylim(0, 115)
-    ax_tr.set_title("Tráfico Estimado por Hora", fontsize=9, fontweight='bold', color=C_BLUE)
+    ax_tr.set_title("Tráfico Estimado por Hora", fontsize=9, fontweight='bold', color=C_DORADO)
     ax_tr.spines['left'].set_visible(False)
     ax_tr.tick_params(left=False)
     ax_tr.set_yticks([])
@@ -577,7 +669,7 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
     colores_dias = [C_BLUE if v >= 85 else C_CYAN if v >= 65 else '#E0E0E0' for v in ts]
     ax_ds.barh(dias_c, ts, color=colores_dias, edgecolor='white', linewidth=0.3)
     ax_ds.set_xlim(0, 115)
-    ax_ds.set_title("Por Día", fontsize=9, fontweight='bold', color=C_BLUE)
+    ax_ds.set_title("Por Día", fontsize=9, fontweight='bold', color=C_DORADO)
     ax_ds.spines['bottom'].set_visible(False)
     ax_ds.set_xticks([])
 
@@ -594,7 +686,7 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
     ax_fc.set_xticklabels([f"M{m}" for m in meses_fc], fontsize=7)
     ax_fc.set_ylabel("MXN (miles)", fontsize=8)
     ax_fc.set_title("Forecast de Ventas — 3 Escenarios", fontsize=9,
-                    fontweight='bold', color=C_BLUE)
+                    fontweight='bold', color=C_DORADO)
     ax_fc.legend(fontsize=7, loc='upper left')
     ax_fc.spines['left'].set_visible(False)
     ax_fc.axvspan(0.5, 4.5, alpha=0.05, color=C_YELLOW)
@@ -607,7 +699,7 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
         ("Calidad",  desglose.get('calidad', 0),  "30%", C_CYAN),
         ("Consolid.", desglose.get('consolidacion', 0), "20%", '#5C6BC0'),
     ]
-    ax_sc.set_title("Score", fontsize=9, fontweight='bold', color=C_BLUE)
+    ax_sc.set_title("Score", fontsize=9, fontweight='bold', color=C_DORADO)
     y_s = [0.72, 0.45, 0.18]
     for (nombre, val, peso, color_s), y in zip(factores_s, y_s):
         ax_sc.add_patch(mpatches.FancyBboxPatch(
@@ -633,7 +725,7 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
         ("Crec. anual zona", f"{datos_inegi.get('tasa_crecimiento_pct',0.55):.2f}%"),
     ]
     ax_dem.set_title("Perfil Demográfico del Área", fontsize=9,
-                     fontweight='bold', color=C_BLUE)
+                     fontweight='bold', color=C_DORADO)
     for i, (label, valor) in enumerate(dem_items):
         col_idx = i % 2
         row_idx = i // 2
@@ -642,9 +734,9 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
         ax_dem.add_patch(mpatches.FancyBboxPatch(
             (x_pos, y_pos - 0.12), 0.45, 0.22,
             boxstyle="round,pad=0.02",
-            facecolor='#F5F8FF', edgecolor='#0047AB22', linewidth=0.5))
+            facecolor='#F5F8FF', edgecolor='#BB944F22', linewidth=0.5))
         ax_dem.text(x_pos + 0.225, y_pos + 0.04, valor,
-                    ha='center', fontsize=9, fontweight='bold', color=C_BLUE)
+                    ha='center', fontsize=9, fontweight='bold', color=C_DORADO)
         ax_dem.text(x_pos + 0.225, y_pos - 0.06, label,
                     ha='center', fontsize=7, color='#666')
     ax_dem.set_xlim(0, 1); ax_dem.set_ylim(0, 1)
@@ -659,13 +751,13 @@ def grafica_dashboard_premium(score, desglose, mercado_data, forecast_data,
 
     inv = roi_data.get('inversion_min', 300000)
     ax_roi.fill_between(meses_roi, [u/1000 for u in util_acum],
-                         alpha=0.2, color=C_BLUE)
+                         alpha=0.2, color=C_DORADO)
     ax_roi.plot(meses_roi, [u/1000 for u in util_acum],
-                color=C_BLUE, linewidth=2, label='Utilidad acum.')
+                color=C_DORADO, linewidth=2, label='Utilidad acum.')
     ax_roi.axhline(y=inv/1000, color=C_RED, linestyle='--', linewidth=1.5,
                    label=f'Inversión ${inv/1000:.0f}K')
     ax_roi.set_title("Curva de Recuperación", fontsize=9,
-                     fontweight='bold', color=C_BLUE)
+                     fontweight='bold', color=C_DORADO)
     ax_roi.set_xticks(meses_roi)
     ax_roi.set_xticklabels([f"M{m}" for m in meses_roi], fontsize=7)
     ax_roi.set_ylabel("Miles MXN", fontsize=8)
