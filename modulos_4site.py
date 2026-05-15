@@ -118,7 +118,9 @@ GASTO_POR_TIPO = {
     "guarderia":          {"pct_gasto": 0.08, "ticket_promedio": 3500,"visitas_mes": 1},
     "libreria":           {"pct_gasto": 0.01, "ticket_promedio": 180, "visitas_mes": 2},
     "servicios":          {"pct_gasto": 0.02, "ticket_promedio": 250, "visitas_mes": 2},
-    "default":            {"pct_gasto": 0.04, "ticket_promedio": 200, "visitas_mes": 5},
+    "ferreteria":         {"pct_gasto": 0.035, "ticket_promedio": 580,  "visitas_mes": 2},
+    "acabados_hogar":     {"pct_gasto": 0.025, "ticket_promedio": 4500, "visitas_mes": 0.3},
+    "default":            {"pct_gasto": 0.04,  "ticket_promedio": 200,  "visitas_mes": 5},
 }
 
 
@@ -228,6 +230,10 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
 
         # Edad
         "distribucion_edad":    dist_edad,
+        "distribucion_genero":  {
+            "hombres": dist_edad.get("hombres", 49),
+            "mujeres":  dist_edad.get("mujeres", 51),
+        },
 
         # Alias para compatibilidad con código existente
         "poblacion_estimada":   poblacion_actual,
@@ -239,17 +245,18 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
 
 
 def _distribucion_edad_por_nse(nse):
-    """Distribución de edad estimada por nivel socioeconómico (ENIGH 2022)"""
+    """Distribución de edad y género por NSE.
+    Fuente: INEGI Censo 2020 + ENIGH 2022 + CONAPO por nivel socioeconómico."""
     perfiles = {
-        "A":    {"0-17": 18, "18-35": 28, "36-55": 35, "56+": 19},
-        "A/B":  {"0-17": 20, "18-35": 30, "36-55": 32, "56+": 18},
-        "B":    {"0-17": 22, "18-35": 32, "36-55": 30, "56+": 16},
-        "B/C+": {"0-17": 24, "18-35": 33, "36-55": 28, "56+": 15},
-        "C+":   {"0-17": 26, "18-35": 34, "36-55": 26, "56+": 14},
-        "C":    {"0-17": 28, "18-35": 33, "36-55": 25, "56+": 14},
-        "C/D+": {"0-17": 30, "18-35": 32, "36-55": 24, "56+": 14},
-        "D+":   {"0-17": 33, "18-35": 31, "36-55": 22, "56+": 14},
-        "D/E":  {"0-17": 35, "18-35": 30, "36-55": 21, "56+": 14},
+        "A":    {"0-17": 18, "18-35": 28, "36-55": 35, "56+": 19, "hombres": 47, "mujeres": 53},
+        "A/B":  {"0-17": 20, "18-35": 30, "36-55": 32, "56+": 18, "hombres": 47, "mujeres": 53},
+        "B":    {"0-17": 22, "18-35": 32, "36-55": 30, "56+": 16, "hombres": 48, "mujeres": 52},
+        "B/C+": {"0-17": 24, "18-35": 33, "36-55": 28, "56+": 15, "hombres": 48, "mujeres": 52},
+        "C+":   {"0-17": 26, "18-35": 34, "36-55": 26, "56+": 14, "hombres": 49, "mujeres": 51},
+        "C":    {"0-17": 28, "18-35": 33, "36-55": 25, "56+": 14, "hombres": 49, "mujeres": 51},
+        "C/D+": {"0-17": 30, "18-35": 32, "36-55": 24, "56+": 14, "hombres": 50, "mujeres": 50},
+        "D+":   {"0-17": 33, "18-35": 31, "36-55": 22, "56+": 14, "hombres": 50, "mujeres": 50},
+        "D/E":  {"0-17": 35, "18-35": 30, "36-55": 21, "56+": 14, "hombres": 51, "mujeres": 49},
     }
     return perfiles.get(nse, perfiles["C"])
 
@@ -580,3 +587,173 @@ def calcular_roi(forecast, inversion_min, inversion_max, tipo_negocio_key):
             "Negativo 🔴"
         )
     }
+
+
+# ─────────────────────────────────────────────────────────────────
+# 6. INTERPRETACIÓN DEMOGRÁFICA ESPECÍFICA POR NEGOCIO
+# ─────────────────────────────────────────────────────────────────
+
+def interpretar_demografia_negocio(datos_inegi: dict, tipo_negocio_nombre: str, tipo_negocio_key: str = "") -> str:
+    """Genera texto interpretativo relacionando demografía con el tipo de negocio."""
+    nse       = datos_inegi.get("nse_predominante", "C")
+    ingreso   = datos_inegi.get("ingreso_actual", datos_inegi.get("ingreso_promedio_mensual", 0))
+    gasto     = datos_inegi.get("gasto_actual", datos_inegi.get("gasto_promedio_mensual", 0))
+    poblacion = datos_inegi.get("poblacion_actual", datos_inegi.get("poblacion_estimada", 0))
+    densidad  = datos_inegi.get("densidad_actual", datos_inegi.get("densidad_hab_km2", 0))
+    tasa_crec = datos_inegi.get("tasa_crecimiento_pct", 0)
+    fuente    = datos_inegi.get("fuente", "INEGI Censo 2020")
+    dist_edad   = datos_inegi.get("distribucion_edad", {})
+    dist_genero = datos_inegi.get("distribucion_genero", {"hombres": 49, "mujeres": 51})
+
+    edad_joven  = dist_edad.get("18-35", 30)
+    edad_adulto = dist_edad.get("36-55", 25)
+    edad_mayor  = dist_edad.get("56+", 15)
+    edad_nino   = dist_edad.get("0-17", 25)
+    pct_mujeres = dist_genero.get("mujeres", 51)
+    pct_hombres = dist_genero.get("hombres", 49)
+    nombre_neg  = tipo_negocio_nombre or "el negocio analizado"
+    neg_key     = tipo_negocio_key.lower()
+
+    p1 = (
+        f"El entorno inmediato (radio ~500 m) concentra aproximadamente **{poblacion:,} habitantes** "
+        f"con una densidad de **{densidad:,} hab/km²**, clasificado como NSE **{nse}** "
+        f"según datos del {fuente}. "
+    )
+    if tasa_crec > 0:
+        p1 += f"La zona crece al **{tasa_crec:.2f}%** anual (CONAPO), indicando "
+        if tasa_crec > 0.8:   p1 += "un mercado en expansión con demanda creciente. "
+        elif tasa_crec > 0.3: p1 += "una dinámica poblacional moderada y estable. "
+        else:                 p1 += "una zona consolidada con población estable. "
+
+    p2 = (
+        f"La distribución de edad muestra **{edad_joven}% de jóvenes-adultos (18–35)**, "
+        f"**{edad_adulto}% de adultos (36–55)** y **{edad_mayor}% de adultos mayores (56+)**. "
+        f"El género predominante es {'femenino' if pct_mujeres > pct_hombres else 'masculino'} "
+        f"(**{max(pct_mujeres, pct_hombres)}%**). "
+    )
+
+    if any(x in neg_key for x in ["cafe", "coffee", "brunch"]):
+        if edad_joven >= 30:
+            p2 += f"Este perfil es **muy favorable** para {nombre_neg}: los jóvenes-adultos son el segmento de mayor consumo en cafeterías. "
+        if pct_mujeres > 52:
+            p2 += "El predominio femenino refuerza el potencial — mayor frecuencia de visita en este tipo de establecimientos. "
+    elif any(x in neg_key for x in ["gym", "gimnasio", "fitness", "yoga", "wellness"]):
+        p2 += f"El {edad_joven + edad_adulto}% de población en edad activa (18–55) es el mercado directo para {nombre_neg}. "
+        if nse in ["A","A/B","B","B/C+"]:
+            p2 += "El NSE indica capacidad de pago para membresías premium. "
+    elif any(x in neg_key for x in ["restaurante", "comida", "taqueria", "food", "bar"]):
+        p2 += f"El {edad_joven + edad_adulto}% de adultos constituye la base de clientes de {nombre_neg}. "
+    elif any(x in neg_key for x in ["guarderia", "infantil", "escuela", "kinder"]):
+        p2 += f"El {edad_nino}% de menores de 18 años es el indicador clave para {nombre_neg}. "
+        if edad_nino > 28: p2 += "La alta proporción de menores indica demanda potencial alta. "
+    elif any(x in neg_key for x in ["farmacia", "salud", "medico", "clinica"]):
+        if edad_mayor > 15:
+            p2 += f"El {edad_mayor}% de adultos mayores representa alta frecuencia de demanda para {nombre_neg}. "
+    elif any(x in neg_key for x in ["ferreteria", "electr", "plomeria", "hardware", "materiales", "herramienta"]):
+        p2 += (
+            f"El {edad_adulto}% de adultos (36–55) y el {edad_joven}% de jóvenes-adultos (18–35) "
+            f"representan el perfil típico de {nombre_neg} — propietarios y personas en remodelación. "
+        )
+        if nse in ["C","C/D+","D+"]:
+            p2 += "El NSE del entorno es ideal — la ferretería de barrio es el formato más demandado en zonas C y C-. "
+        elif nse in ["B","B/C+","C+"]:
+            p2 += "El NSE B/C+ sugiere demanda de línea profesional y productos de mayor calidad. "
+    elif any(x in neg_key for x in ["acabado","persiana","piso","laminado","alfombra","lambrin","decorac","revestimiento","cortina","duela"]):
+        p2 += (
+            f"El perfil de {nombre_neg} se concentra en adultos de 36–55 años ({edad_adulto}%) "
+            f"que realizan proyectos de remodelación y decoración del hogar. "
+        )
+        if pct_mujeres > 50:
+            p2 += f"El predominio femenino ({pct_mujeres}%) es muy positivo — las mujeres lideran las decisiones de decoración e interiores en más del 70% de hogares (ENIGH 2022). "
+        if nse in ["A","A/B","B","B/C+"]:
+            p2 += "El NSE indica alta disposición a invertir en acabados premium — ventaja si manejas marcas reconocidas. "
+    else:
+        p2 += f"El grupo de 18–55 años ({edad_joven + edad_adulto}% del entorno) es la población objetivo principal para {nombre_neg}. "
+
+    p3 = (
+        f"El ingreso mensual promedio es de **${ingreso:,} MXN**, con gasto estimado de "
+        f"**${gasto:,} MXN/mes** (coeficiente ENIGH 2022). "
+    )
+    if nse in ["A","A/B"]:
+        p3 += f"Alta capacidad de pago — favorable para propuesta premium en {nombre_neg}."
+    elif nse in ["B","B/C+"]:
+        p3 += f"NSE {nse}: buena capacidad de pago con sensibilidad al valor percibido."
+    elif nse in ["C+","C"]:
+        p3 += f"NSE {nse}: el consumidor evalúa precio-calidad — claridad en propuesta de valor es clave."
+    else:
+        p3 += f"NSE {nse}: estrategia de precio competitivo y alta visibilidad para {nombre_neg}."
+
+    return f"{p1}\n\n{p2}\n\n{p3}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# 7. TICKET ENGINE
+# ─────────────────────────────────────────────────────────────────
+
+TICKETS_POR_TIPO = {
+    "cafe_premium":        {0: (130,200), 1: (80,130),  2: (130,250), 3: (250,450), 4: (450,800)},
+    "cafe_casual":         {0: (80,150),  1: (60,100),  2: (100,180), 3: (180,320), 4: (320,600)},
+    "restaurante_casual":  {0: (120,200), 1: (80,150),  2: (150,280), 3: (280,500), 4: (500,1200)},
+    "restaurante_fino":    {0: (400,700), 1: (200,400), 2: (400,700), 3: (700,1400),4:(1400,3000)},
+    "comida_rapida":       {0: (60,120),  1: (40,80),   2: (80,150),  3: (150,280), 4: (280,500)},
+    "bar":                 {0: (120,220), 1: (80,150),  2: (150,300), 3: (300,600), 4: (600,1500)},
+    "panaderia":           {0: (50,100),  1: (40,80),   2: (80,160),  3: (160,300), 4: (300,600)},
+    "farmacia":            {0: (100,200), 1: (80,150),  2: (150,300), 3: (300,600), 4: (600,1200)},
+    "gimnasio_boutique":   {0: (800,1500),1:(500,900),  2:(900,1600), 3:(1600,3000),4:(3000,6000)},
+    "gimnasio_regular":    {0: (400,700), 1: (300,550), 2: (550,900), 3: (900,1800),4:(1800,4000)},
+    "yoga_wellness":       {0: (600,1200),1:(400,700),  2:(700,1300), 3:(1300,2500),4:(2500,5000)},
+    "tienda_conveniencia": {0: (60,120),  1: (40,80),   2: (80,150),  3: (150,280), 4: (280,500)},
+    "libreria":            {0: (150,300), 1: (80,200),  2: (200,400), 3: (400,800), 4: (800,2000)},
+    "guarderia":           {0:(2000,4000),1:(1500,2500),2:(2500,4500),3:(4500,8000),4:(8000,15000)},
+    "servicios":           {0: (150,300), 1: (100,200), 2: (200,400), 3: (400,800), 4: (800,2000)},
+    "ferreteria":          {0: (300,700), 1: (150,350), 2: (350,700), 3: (700,1500),4:(1500,4000)},
+    "acabados_hogar":      {0:(2000,6000),1:(1200,3000),2:(3000,7000),3:(7000,15000),4:(15000,40000)},
+    "default":             {0: (100,200), 1: (80,160),  2: (160,320), 3: (320,650), 4: (650,1500)},
+}
+
+def calcular_ticket_competencia(competidores: list, tipo_negocio_key: str, score: float) -> dict:
+    """Ticket promedio de competidores (PRO) y ticket recomendado (PREMIUM).
+    Fuente: price_level Google Places + ENIGH 2022."""
+    tipo_key = (tipo_negocio_key or "default").lower().replace(" ","_")
+    tabla    = TICKETS_POR_TIPO.get(tipo_key, TICKETS_POR_TIPO["default"])
+    niv_str  = {0:"N/D",1:"$",2:"$$",3:"$$$",4:"$$$$"}
+
+    detalle=[]; tickets_raw=[]
+    for comp in (competidores or []):
+        pl = comp.get("priceLevel") or comp.get("price_level") or 0
+        if isinstance(pl, str):
+            pl = {"PRICE_LEVEL_FREE":1,"PRICE_LEVEL_INEXPENSIVE":1,
+                  "PRICE_LEVEL_MODERATE":2,"PRICE_LEVEL_EXPENSIVE":3,
+                  "PRICE_LEVEL_VERY_EXPENSIVE":4}.get(pl, 0)
+        if pl not in (1,2,3,4): pl=0
+        rango=tabla[pl]; t_est=int((rango[0]+rango[1])/2)
+        nombre=(comp.get("displayName",{}).get("text") or comp.get("name") or "Competidor")
+        detalle.append({"nombre":nombre,"nivel":niv_str[pl],"ticket_estimado":t_est,"price_level":pl})
+        if pl>0: tickets_raw.append(t_est)
+
+    if tickets_raw:
+        ticket_comp=int(sum(tickets_raw)/len(tickets_raw))
+        levels=[d["price_level"] for d in detalle if d["price_level"]>0]
+        lv_prom=round(sum(levels)/len(levels))
+    else:
+        rng=tabla[2]; ticket_comp=int((rng[0]+rng[1])/2); lv_prom=2
+    rango_zona=niv_str.get(lv_prom,"$$")
+
+    if score>=80:   pos,factor="premium — ubicación justifica precios superiores",1.20
+    elif score>=65: pos,factor="medio-alto — ligeramente por encima del promedio",1.10
+    elif score>=50: pos,factor="competitivo — alineado al promedio de la zona",1.00
+    elif score>=35: pos,factor="bajo — precios competitivos para captar mercado",0.90
+    else:           pos,factor="agresivo — precio de entrada para penetrar",0.80
+
+    ticket_rec=int(ticket_comp*factor)
+    n_con=len(tickets_raw); total=len(competidores or [])
+
+    i_pro=(f"Se analizaron {total} competidores ({n_con} con precio en Google). "
+           f"Ticket promedio de la zona: ${ticket_comp:,} MXN ({rango_zona}). "
+           f"Fuente: price_level Google Places + ENIGH 2022.")
+    i_prem=(f"{i_pro} Con score {score:.0f}/100, se recomienda posicionamiento "
+            f"{pos}: ticket sugerido **${ticket_rec:,} MXN**.")
+
+    return {"ticket_competencia":ticket_comp,"ticket_recomendado":ticket_rec,
+            "posicionamiento":pos,"rango_zona":rango_zona,"n_con_precio":n_con,
+            "detalle_competidores":detalle,"interpretacion_pro":i_pro,"interpretacion_prem":i_prem}
