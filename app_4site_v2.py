@@ -6364,4 +6364,66 @@ if "resultados" in st.session_state:
             if pptx_buf:
                 _dir_clean = ubicacion[:25].replace(" ","_").replace(",","").replace(".","")
                 _fname = f"4site_{tier_key}_{_dir_clean}.pptx"
-                tier_nombres = {"free":"Gratis","basico":"Básico $99","
+                tier_nombres = {"free":"Gratis","basico":"Básico $99","pro":"PRO $299",
+                                "premium":"PREMIUM $999","premium2":"ZONA ELITE $1,500"}
+                st.download_button(
+                    label=f"⬇️  Descargar presentación PowerPoint",
+                    data=pptx_buf,
+                    file_name=_fname,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True,
+                    type="primary",
+                    key="btn_descarga_pptx_main"
+                )
+                _slides = {"free":"2 slides","basico":"5 slides","pro":"7 slides",
+                           "premium":"10 slides","premium2":"4 slides"}
+                st.caption(f"📊 {tier_nombres.get(tier_key,'')} · {_slides.get(tier_key,'')} · "
+                           f"Editable en PowerPoint · {ubicacion[:40]}...")
+            else:
+                st.error("No se pudo generar el reporte. Intenta de nuevo.")
+        except Exception as e_pptx:
+            st.error(f"Error al generar reporte: {e_pptx}")
+            _key_err = "exp_err_open"
+            if _key_err not in st.session_state: st.session_state[_key_err] = False
+            if st.button("Ver detalle del error", key="btn_err_exp"):
+                st.session_state[_key_err] = not st.session_state[_key_err]
+            if st.session_state[_key_err]:
+                import traceback
+                st.code(traceback.format_exc())
+    else:
+        st.warning("Módulo PPTX no disponible. Instala: `pip install python-pptx`")
+
+# ── CTA BOTTOM ──────────────────────────────
+st.markdown("---")
+st.markdown(f"""
+<div style='text-align:center; padding:36px 40px; background:#0D0D0D;
+     border-radius:16px; color:white; font-family:Montserrat,sans-serif;'>
+    <div style='font-size:22px; font-weight:700; margin-bottom:6px;'>{t['cta_titulo']}</div>
+    <div style='font-size:13px; color:#AAAAAA; margin-bottom:20px;'>{t['cta_intro']}</div>
+    <div style='display:flex; justify-content:center; gap:16px; flex-wrap:wrap;'>
+        <div style='background:#1A1A1A; border:1px solid #333; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
+            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>BÁSICO</div>
+            <div style='font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:6px;'>$99 <span style='font-size:12px;color:#888;'>MXN</span></div>
+            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Análisis completo<br>Demografía<br>PDF 6 páginas</div>
+        </div>
+        <div style='background:#1A1A1A; border:2px solid #BB944F; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
+            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PRO ⭐</div>
+            <div style='font-size:20px; font-weight:700; color:#BB944F; margin-bottom:6px;'>$299 <span style='font-size:12px;color:#888;'>MXN</span></div>
+            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
+        </div>
+        <div style='background:#1A1A1A; border:1px solid #555; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
+            <div style='font-size:11px; color:#D4AF37; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PREMIUM 💎</div>
+            <div style='font-size:20px; font-weight:700; color:#D4AF37; margin-bottom:6px;'>$999 <span style='font-size:12px;color:#888;'>MXN</span></div>
+            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
+        </div>
+    </div>
+    <div style='margin-top:20px; font-size:12px; color:#666;'>📧 hola@4site.mx</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown(f"""
+<div style='text-align:center; color:#999; font-size:13px;'>
+    {t['footer_derechos']}<br>{t['footer_contacto']}
+</div>
+""", unsafe_allow_html=True)
