@@ -529,6 +529,176 @@ def _interpretar_canibalizacion(muy_cercanos, cercanos, en_radio):
 # RENDERIZADOR EN STREAMLIT
 # ─────────────────────────────────────────────────────────────────
 
+
+def _clasificar_vialidad(nombre: str) -> tuple:
+    """
+    Clasifica una vialidad según su nombre.
+    Retorna (tipo, color, peso_linea)
+    """
+    n = nombre.lower() if nombre else ""
+    if any(x in n for x in ["autopista","periferico","periférico","circuito","anillo","libramiento","distribuidor"]):
+        return ("Autopista/Periférico", "#E74C3C", 5)
+    elif any(x in n for x in ["blvd","boulevard","bulevar","calzada","viaducto","eje"]):
+        return ("Boulevard/Calzada", "#E67E22", 4)
+    elif any(x in n for x in ["av ","av.","avenida","avenue"]):
+        return ("Avenida principal", "#BB944F", 3)
+    elif any(x in n for x in ["calle","cll","cl ","street"]):
+        return ("Calle secundaria", "#6B6B6B", 2)
+    elif any(x in n for x in ["andador","privada","priv","cerrada","pasaje"]):
+        return ("Privada/Andador", "#AAAAAA", 1)
+    elif nombre and len(nombre) > 2:
+        return ("Vialidad local", "#999999", 1)
+    return ("Desconocida", "#CCCCCC", 1)
+
+
+def crear_mapa_vialidades(lat: float, lng: float, api_key: str,
+                           competidores: list = None, idioma: str = "es"):
+    """
+    Crea un mapa Folium que clasifica las vialidades cercanas usando
+    geocoding inverso de Google Maps y muestra los competidores como capa.
+    Retorna (mapa_folium, interpretacion_str)
+    """
+    import folium
+    from folium import plugins
+
+    m = folium.Map(
+        location=[lat, lng],
+        zoom_start=15,
+        tiles="CartoDB positron",
+        prefer_canvas=True,
+    )
+
+    # ── Marcador de la ubicación analizada ──
+    folium.Marker(
+        location=[lat, lng],
+        tooltip="📍 Ubicación analizada",
+        popup="<b>Ubicación analizada</b>",
+        icon=folium.Icon(color="blue", icon="star", prefix="fa"),
+    ).add_to(m)
+
+    # ── Clasificar vialidades con geocoding inverso ──
+    puntos_clasificados = []
+    vialidades_encontradas = {}
+    import math
+
+    try:
+        import googlemaps as _gm
+        import os as _os
+        _client = _gm.Client(key=api_key)
+
+        # Muestrear puntos en un radio de 400m en 8 direcciones
+        for angulo in range(0, 360, 30):
+            for dist in [150, 300, 450]:
+                _rad = math.radians(angulo)
+                _dlat = (dist / 111320) * math.cos(_rad)
+                _dlng = (dist / (111320 * math.cos(math.radians(lat)))) * math.sin(_rad)
+                _p_lat = lat + _dlat
+                _p_lng = lng + _dlng
+
+                try:
+                    geo = _client.reverse_geocode((_p_lat, _p_lng))
+                    if geo:
+                        for comp in geo[0].get("address_components", []):
+                            if "route" in comp.get("types", []):
+                                nombre_vial = comp["long_name"]
+                                if nombre_vial not in vialidades_encontradas:
+                                    tipo, color, peso = _clasificar_vialidad(nombre_vial)
+                                    vialidades_encontradas[nombre_vial] = {
+                                        "tipo": tipo, "color": color, "peso": peso,
+                                        "puntos": []
+                                    }
+                                vialidades_encontradas[nombre_vial]["puntos"].append(
+                                    [_p_lat, _p_lng]
+                                )
+                except Exception:
+                    continue
+
+    except Exception:
+        pass
+
+    # ── Dibujar vialidades como círculos de color ──
+    for nombre_v, datos_v in vialidades_encontradas.items():
+        for pt in datos_v["puntos"]:
+            folium.CircleMarker(
+                location=pt,
+                radius=datos_v["peso"] * 2 + 2,
+                color=datos_v["color"],
+                fill=True,
+                fill_color=datos_v["color"],
+                fill_opacity=0.55,
+                tooltip=f"🛣️ {nombre_v} ({datos_v['tipo']})",
+                popup=folium.Popup(
+                    f"<b>{nombre_v}</b><br>Tipo: {datos_v['tipo']}",
+                    max_width=200
+                ),
+            ).add_to(m)
+
+    # ── Competidores como capa ──
+    if competidores:
+        comp_group = folium.FeatureGroup(name="Competidores")
+        for comp in (competidores or [])[:20]:
+            loc_c = comp.get("location") or comp.get("geometry", {}).get("location", {})
+            c_lat = loc_c.get("latitude") or loc_c.get("lat", 0)
+            c_lng = loc_c.get("longitude") or loc_c.get("lng", 0)
+            if not c_lat or not c_lng:
+                continue
+            nombre_c = (comp.get("displayName", {}).get("text") or
+                        comp.get("name", "Competidor"))
+            rating = comp.get("rating", 0)
+            folium.CircleMarker(
+                location=[c_lat, c_lng],
+                radius=9,
+                color="#E74C3C",      # rojo para competidores — diferente de vialidades
+                fill=True,
+                fill_color="#E74C3C",
+                fill_opacity=0.85,
+                tooltip=f"🏪 {nombre_c} ★{rating}",
+                popup=folium.Popup(f"<b>{nombre_c}</b><br>⭐ {rating}", max_width=180),
+            ).add_to(comp_group)
+        comp_group.add_to(m)
+
+    # ── Leyenda de vialidades ──
+    leyenda_html = """
+    <div style='position:fixed; bottom:20px; left:20px; z-index:1000;
+         background:white; padding:12px 16px; border-radius:10px;
+         border:1px solid #ddd; font-family:sans-serif; font-size:12px;
+         box-shadow:2px 2px 6px rgba(0,0,0,.15);'>
+      <b style='color:#1A1A1A;'>🛣️ Tipo de vialidad</b><br>
+      <span style='color:#E74C3C;'>●</span> Autopista/Periférico<br>
+      <span style='color:#E67E22;'>●</span> Boulevard/Calzada<br>
+      <span style='color:#BB944F;'>●</span> Avenida principal<br>
+      <span style='color:#6B6B6B;'>●</span> Calle secundaria<br>
+      <span style='color:#AAAAAA;'>●</span> Privada/Local<br>
+      <span style='color:#E74C3C;'>●</span> Competidor
+    </div>"""
+    m.get_root().html.add_child(folium.Element(leyenda_html))
+    folium.LayerControl().add_to(m)
+
+    # ── Interpretación textual ──
+    conteos = {}
+    for d in vialidades_encontradas.values():
+        t = d["tipo"]
+        conteos[t] = conteos.get(t, 0) + 1
+
+    if conteos:
+        tipos_str = ", ".join(f"{t} ({n})" for t, n in
+                              sorted(conteos.items(), key=lambda x: -x[1])[:3])
+        interpretacion = (
+            f"Se identificaron {len(vialidades_encontradas)} vialidades en el entorno. "
+            f"Predominan: {tipos_str}. "
+        )
+        if "Avenida principal" in conteos or "Boulevard/Calzada" in conteos:
+            interpretacion += "La zona tiene buena conectividad vial y visibilidad comercial."
+        elif "Autopista/Periférico" in conteos:
+            interpretacion += "Zona de alto flujo vehicular — buena visibilidad pero difícil acceso peatonal."
+        else:
+            interpretacion += "Zona de calles locales — tráfico moderado, ideal para negocios de destino."
+    else:
+        interpretacion = "No se pudieron clasificar las vialidades del entorno. El mapa muestra los competidores cercanos."
+
+    return m, interpretacion
+
+
 def render_mapa_con_interpretacion(mapa, interpretacion, altura=420, titulo=""):
     """Renderiza un mapa Folium en Streamlit con texto de interpretación"""
     try:
