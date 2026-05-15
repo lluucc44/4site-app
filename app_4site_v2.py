@@ -1389,8 +1389,8 @@ def calcular_score_competencia(competidores, tipo_key):
 
     score_final = int(d*0.50 + q*0.30 + c_score*0.20)
     return score_final, {"densidad": int(d), "calidad": int(q), "consolidacion": int(c_score),
-                         "num_competidores": n, "rating_promedio": round(avg_r, 1) if avg_r else "N/A",
-                         "reseñas_promedio": int(avg_rv) if avg_rv else "N/A"}
+                         "num_competidores": n, "rating_promedio": round(avg_r, 1) if avg_r else 0,
+                         "reseñas_promedio": int(avg_rv) if avg_rv else 0}
 
 
 def ajustar_score_por_contexto(score_base, tipo_key, contexto):
@@ -6420,9 +6420,18 @@ if "resultados" in st.session_state:
                     "num_competidores": int(_r.get("num_competidores") or 0),
                 })
 
+            # Sanitizar desglose — asegurar que todos los valores numéricos son float/int
+            # rating_promedio y otros valores pueden llegar como str desde calcular_score
+            _desglose_dl = {}
+            for _k, _v in (desglose or {}).items():
+                try:
+                    _desglose_dl[_k] = float(_v) if isinstance(_v, str) else _v
+                except (ValueError, TypeError):
+                    _desglose_dl[_k] = _v
+
             pptx_buf = _generar_pptx_por_tier(
                 tier_key,
-                ubicacion=ubicacion, score=score, desglose=desglose,
+                ubicacion=ubicacion, score=float(score or 0), desglose=_desglose_dl,
                 analisis=_analisis_dl, competidores=competidores,
                 idioma=idioma, lat=lat, lng=lng, modo=modo,
                 tipo_negocio=_tipo_nombre_dl or tipo_negocio_seleccionado or "",
