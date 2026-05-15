@@ -1786,6 +1786,24 @@ ANÁLISIS DE VIALIDAD:
 - Análisis: {((contexto or {}).get('analisis_vial') or {}).get('descripcion', 'No disponible')}
 - Dependencia al tráfico de paso: {((contexto or {}).get('analisis_vial') or {}).get('dependencia_paso', 'medio')}"""
 
+    # ── Plaza comercial — extraer de contexto si existe ──
+    _info_plaza_ctx = (contexto or {}).get("info_plaza", {}) if contexto else {}
+    _tipo_plaza_ctx = _info_plaza_ctx.get("tipo_plaza") if _info_plaza_ctx else None
+    _nota_plaza_ctx = _info_plaza_ctx.get("nota", "") if _info_plaza_ctx else ""
+    _zona_mall_ctx  = _info_plaza_ctx.get("zona_mall", "") if _info_plaza_ctx else ""
+    _roi_adj_ctx    = _info_plaza_ctx.get("ajuste_roi_pct", 0) if _info_plaza_ctx else 0
+
+    if _tipo_plaza_ctx:
+        _plaza_label = "Mall / Plaza Cerrada" if _tipo_plaza_ctx == "mall" else "Strip Center / Plaza Abierta"
+        datos_base += f"""
+
+TIPO DE UBICACIÓN — PLAZA COMERCIAL:
+- Tipo de plaza: {_plaza_label}
+{"- Zona dentro del mall: " + _zona_mall_ctx if _zona_mall_ctx and _tipo_plaza_ctx == "mall" else ""}
+{"- Penalización ROI por renta: -" + str(_roi_adj_ctx) + "% vs local en calle equivalente" if _roi_adj_ctx > 0 else ""}
+- Notas de plaza: {_nota_plaza_ctx}
+INSTRUCCIÓN: Incluye una sección específica sobre las implicaciones de estar en {"un mall cerrado (tráfico captivo, renta alta, competencia interna, food court vs zona servicios)" if _tipo_plaza_ctx == "mall" else "un strip center (visibilidad desde calle, impacto de tienda ancla, tráfico mixto)"} en tu recomendación final."""
+
     datos_pro = ""
     if trafico_data:
         picos = trafico_data.get('horas_pico', [])
@@ -4190,6 +4208,34 @@ def generar_pdf_pro(ubicacion, score, desglose, analisis, competidores,
         ]))
         story.extend(_seccion_pdf("Análisis de Vialidad:", "🛣️", s))
         story.append(tbl_vial)
+
+    # Sección de plaza comercial en PDF — si aplica
+    _ip_pdf = contexto.get("info_plaza", {}) if contexto else {}
+    if _ip_pdf and _ip_pdf.get("tipo_plaza"):
+        _pl_tipo_pdf  = _ip_pdf["tipo_plaza"]
+        _pl_label_pdf = "🏬 Mall / Plaza Cerrada" if _pl_tipo_pdf == "mall" else "🏪 Strip Center / Plaza Abierta"
+        _pl_nota_pdf  = _ip_pdf.get("nota", "").replace("\n", "  |  ")
+        _pl_roi_pdf   = _ip_pdf.get("ajuste_roi_pct", 0)
+        _pl_zona_pdf  = _ip_pdf.get("zona_mall", "")
+        story.append(Spacer(1, 0.08*inch))
+        story.extend(_seccion_pdf("Tipo de Ubicación — Plaza Comercial:", "🏢", s))
+        plaza_rows = [["Tipo de plaza:", _pl_label_pdf]]
+        if _pl_zona_pdf and _pl_tipo_pdf == "mall":
+            plaza_rows.append(["Zona en mall:", _pl_zona_pdf])
+        if _pl_roi_pdf > 0:
+            plaza_rows.append(["Impacto ROI:", f"⚠️ -{_pl_roi_pdf}% vs local en calle equivalente por renta de plaza"])
+        plaza_rows.append(["Notas:", _pl_nota_pdf[:300]])
+        tbl_plaza = Table(plaza_rows, colWidths=[1.5*inch, 4*inch])
+        tbl_plaza.setStyle(TableStyle([
+            ('FONTNAME',  (0,0),(0,-1), 'Helvetica-Bold'),
+            ('FONTSIZE',  (0,0),(-1,-1), 9),
+            ('TEXTCOLOR', (0,0),(0,-1), colors.HexColor('#6B6B6B')),
+            ('ROWBACKGROUNDS',(0,0),(-1,-1),[colors.HexColor('#FFF8F0'), colors.white]),
+            ('GRID',(0,0),(-1,-1),0.3,colors.HexColor('#DDDDDD')),
+            ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+        ]))
+        story.append(tbl_plaza)
         # Narrativa interpretativa vial para PRO/PREMIUM
         _tipo_nom_vial = (tipo_info_efectivo.get('nombre','') if 'tipo_info_efectivo' in dir()
                           else tipo_info.get('nombre',''))
@@ -5527,6 +5573,23 @@ if "resultados" in st.session_state:
 
     # Desglose score (Basic+)
     if tier_info["muestra_score_desglose"] and desglose:
+
+        # ── Banner de plaza si aplica ──
+        _ip = contexto.get("info_plaza", {}) if contexto else {}
+        if _ip and _ip.get("tipo_plaza"):
+            _pl_label = "🏬 Mall / Plaza Cerrada" if _ip["tipo_plaza"] == "mall" else "🏪 Strip Center / Plaza Abierta"
+            _pl_color = "#BB944F" if _ip["tipo_plaza"] == "mall" else "#1A76D2"
+            _pl_notas = _ip.get("nota", "").replace("\n", "<br>")
+            _pl_roi   = _ip.get("ajuste_roi_pct", 0)
+            st.markdown(f"""
+            <div style='background:#1A1A1A; border-left:4px solid {_pl_color};
+                 border-radius:8px; padding:12px 16px; margin:10px 0;'>
+                <div style='color:{_pl_color}; font-weight:700; font-size:13px; margin-bottom:6px;'>
+                    {_pl_label} — Impacto en el análisis</div>
+                <div style='color:#CCCCCC; font-size:12px; line-height:1.6;'>{_pl_notas}</div>
+                {"<div style='color:#F39C12; font-size:11px; margin-top:6px;'>⚠️ El ROI estimado ya incluye una reducción de ~" + str(_pl_roi) + "% por renta de plaza.</div>" if _pl_roi > 0 else ""}
+            </div>""", unsafe_allow_html=True)
+
         st.markdown(f"#### {t['desglose_score']}")
 
         # Definir interpretaciones dinámicas
@@ -6301,66 +6364,4 @@ if "resultados" in st.session_state:
             if pptx_buf:
                 _dir_clean = ubicacion[:25].replace(" ","_").replace(",","").replace(".","")
                 _fname = f"4site_{tier_key}_{_dir_clean}.pptx"
-                tier_nombres = {"free":"Gratis","basico":"Básico $99","pro":"PRO $299",
-                                "premium":"PREMIUM $999","premium2":"ZONA ELITE $1,500"}
-                st.download_button(
-                    label=f"⬇️  Descargar presentación PowerPoint",
-                    data=pptx_buf,
-                    file_name=_fname,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True,
-                    type="primary",
-                    key="btn_descarga_pptx_main"
-                )
-                _slides = {"free":"2 slides","basico":"5 slides","pro":"7 slides",
-                           "premium":"10 slides","premium2":"4 slides"}
-                st.caption(f"📊 {tier_nombres.get(tier_key,'')} · {_slides.get(tier_key,'')} · "
-                           f"Editable en PowerPoint · {ubicacion[:40]}...")
-            else:
-                st.error("No se pudo generar el reporte. Intenta de nuevo.")
-        except Exception as e_pptx:
-            st.error(f"Error al generar reporte: {e_pptx}")
-            _key_err = "exp_err_open"
-            if _key_err not in st.session_state: st.session_state[_key_err] = False
-            if st.button("Ver detalle del error", key="btn_err_exp"):
-                st.session_state[_key_err] = not st.session_state[_key_err]
-            if st.session_state[_key_err]:
-                import traceback
-                st.code(traceback.format_exc())
-    else:
-        st.warning("Módulo PPTX no disponible. Instala: `pip install python-pptx`")
-
-# ── CTA BOTTOM ──────────────────────────────
-st.markdown("---")
-st.markdown(f"""
-<div style='text-align:center; padding:36px 40px; background:#0D0D0D;
-     border-radius:16px; color:white; font-family:Montserrat,sans-serif;'>
-    <div style='font-size:22px; font-weight:700; margin-bottom:6px;'>{t['cta_titulo']}</div>
-    <div style='font-size:13px; color:#AAAAAA; margin-bottom:20px;'>{t['cta_intro']}</div>
-    <div style='display:flex; justify-content:center; gap:16px; flex-wrap:wrap;'>
-        <div style='background:#1A1A1A; border:1px solid #333; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>BÁSICO</div>
-            <div style='font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:6px;'>$99 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Análisis completo<br>Demografía<br>PDF 6 páginas</div>
-        </div>
-        <div style='background:#1A1A1A; border:2px solid #BB944F; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PRO ⭐</div>
-            <div style='font-size:20px; font-weight:700; color:#BB944F; margin-bottom:6px;'>$299 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
-        </div>
-        <div style='background:#1A1A1A; border:1px solid #555; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#D4AF37; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PREMIUM 💎</div>
-            <div style='font-size:20px; font-weight:700; color:#D4AF37; margin-bottom:6px;'>$999 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
-        </div>
-    </div>
-    <div style='margin-top:20px; font-size:12px; color:#666;'>📧 hola@4site.mx</div>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown("---")
-st.markdown(f"""
-<div style='text-align:center; color:#999; font-size:13px;'>
-    {t['footer_derechos']}<br>{t['footer_contacto']}
-</div>
-""", unsafe_allow_html=True)
+                tier_nombres = {"free":"Gratis","basico":"Básico $99","
