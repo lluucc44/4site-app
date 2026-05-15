@@ -5038,61 +5038,117 @@ direccion_texto = st.text_input("", placeholder=t["placeholder_direccion"],
 _tipo_plaza_detectado = detectar_tipo_plaza(direccion_texto or "")
 tipo_plaza = None  # se definirá abajo
 
-if _tipo_plaza_detectado == "mall":
-    tipo_plaza = "mall"
-    st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #BB944F;
-        border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-        <span style='color:#BB944F; font-weight:700;'>🏬 Mall / Plaza Cerrada detectado</span><br>
-        <span style='color:#AAAAAA; font-size:12px;'>
-        El análisis aplicará lógica especial para plazas cerradas:
-        mayor peso a competidores internos, tráfico destino garantizado y ajuste de ROI por renta elevada.</span>
-        </div>""", unsafe_allow_html=True)
+# PRO y PREMIUM: selector siempre visible (con default inteligente de auto-detección)
+if tier_key in ["pro", "premium", "premium2"]:
 
-elif _tipo_plaza_detectado == "strip_center":
-    tipo_plaza = "strip_center"
-    st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #1A76D2;
-        border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-        <span style='color:#1A76D2; font-weight:700;'>🏪 Strip Center / Plaza Abierta detectada</span><br>
-        <span style='color:#AAAAAA; font-size:12px;'>
-        Análisis con lógica de plaza abierta: visibilidad desde la calle, 
-        tráfico mixto (paso + destino) y competencia en radio exterior.</span>
-        </div>""", unsafe_allow_html=True)
+    _default_plaza = {
+        "mall":          "mall",
+        "strip_center":  "strip_center",
+        "plaza_ambigua": "strip_center",
+    }.get(_tipo_plaza_detectado, "calle")
 
-elif _tipo_plaza_detectado == "plaza_ambigua" and direccion_texto:
-    st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #F39C12;
-        border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-        <span style='color:#F39C12; font-weight:700;'>🏢 ¿Qué tipo de plaza es?</span><br>
-        <span style='color:#AAAAAA; font-size:12px;'>
-        Detectamos que tu ubicación está dentro de una plaza. 
-        Selecciona el tipo para que el análisis sea más preciso.</span>
-        </div>""", unsafe_allow_html=True)
-    tipo_plaza = st.radio(
-        "",
-        options=["strip_center", "mall", "no_plaza"],
-        format_func=lambda x: {
-            "strip_center": "🏪 Plaza abierta / Strip center — locales con cajones al frente, visible desde la calle",
-            "mall":         "🏬 Mall / Plaza cerrada — entorno delimitado tipo Galerías, Antara, Metepec",
-            "no_plaza":     "🚶 No es plaza — es calle o edificio normal",
-        }.get(x, x),
-        key="tipo_plaza_radio",
-        horizontal=False,
-    )
-    if tipo_plaza == "no_plaza":
-        tipo_plaza = None
+    if _tipo_plaza_detectado in ["mall", "strip_center", "plaza_ambigua"]:
+        _det_labels = {
+            "mall":          "🏬 Detectamos que tu dirección corresponde a un mall o plaza cerrada.",
+            "strip_center":  "🏪 Detectamos que tu dirección corresponde a un strip center o plaza abierta.",
+            "plaza_ambigua": "🏢 Detectamos que tu dirección puede estar dentro de una plaza — confirma el tipo.",
+        }
+        st.markdown(f"""<div style='background:#1A1A1A; border-left:4px solid #F39C12;
+            border-radius:6px; padding:8px 14px; margin:2px 0 6px;'>
+            <span style='color:#F39C12; font-size:12px;'>{_det_labels[_tipo_plaza_detectado]}
+            Confirma o ajusta abajo.</span></div>""", unsafe_allow_html=True)
 
-# ── Info adicional para MALL ────────────────────────────────────
-if tipo_plaza == "mall" and direccion_texto:
+    st.markdown("**¿Esta ubicación está dentro de una plaza comercial?**")
+    _col_pz1, _col_pz2 = st.columns([3, 2])
+    with _col_pz1:
+        _tipo_plaza_sel = st.radio(
+            "",
+            options=["calle", "strip_center", "mall"],
+            format_func=lambda x: {
+                "calle":        "🚶 No — está en calle, avenida o edificio normal",
+                "strip_center": "🏪 Sí — Plaza abierta / Strip center (locales con cajones al frente)",
+                "mall":         "🏬 Sí — Mall / Plaza cerrada (tipo Galerías, Antara, Perisur)",
+            }.get(x, x),
+            index=["calle", "strip_center", "mall"].index(_default_plaza),
+            key="tipo_plaza_radio_pro",
+            horizontal=False,
+            label_visibility="collapsed",
+        )
+    tipo_plaza = None if _tipo_plaza_sel == "calle" else _tipo_plaza_sel
+
+    with _col_pz2:
+        if tipo_plaza == "mall":
+            st.markdown("""<div style='background:#1A1A1A; border-left:3px solid #BB944F;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#AAAAAA;'>
+                <b style='color:#BB944F;'>Mall cerrado</b><br>
+                Amplía radio de competencia a 1km, aplica lógica de tráfico captivo
+                y ajusta ROI por renta elevada.</div>""", unsafe_allow_html=True)
+        elif tipo_plaza == "strip_center":
+            st.markdown("""<div style='background:#1A1A1A; border-left:3px solid #1A76D2;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#AAAAAA;'>
+                <b style='color:#1A76D2;'>Strip center / plaza abierta</b><br>
+                Visibilidad desde la calle, tráfico mixto paso + destino.
+                La tienda ancla tiene alto impacto.</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""<div style='background:#1A1A1A; border-left:3px solid #555;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#AAAAAA;'>
+                <b style='color:#CCC;'>Calle / avenida</b><br>
+                Análisis estándar: visibilidad de paso, vialidad y demografía del entorno.
+                </div>""", unsafe_allow_html=True)
+
+else:
+    # FREE y BÁSICO: solo auto-detección
+    if _tipo_plaza_detectado == "mall":
+        tipo_plaza = "mall"
+        st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #BB944F;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#BB944F; font-weight:700;'>🏬 Mall / Plaza Cerrada detectado</span><br>
+            <span style='color:#AAAAAA; font-size:12px;'>
+            El análisis aplicará lógica especial para plazas cerradas.</span>
+            </div>""", unsafe_allow_html=True)
+    elif _tipo_plaza_detectado == "strip_center":
+        tipo_plaza = "strip_center"
+        st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #1A76D2;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#1A76D2; font-weight:700;'>🏪 Strip Center / Plaza Abierta detectada</span><br>
+            <span style='color:#AAAAAA; font-size:12px;'>
+            Análisis con lógica de plaza abierta.</span>
+            </div>""", unsafe_allow_html=True)
+    elif _tipo_plaza_detectado == "plaza_ambigua" and direccion_texto:
+        st.markdown("""<div style='background:#1A1A1A; border-left:4px solid #F39C12;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#F39C12; font-weight:700;'>🏢 ¿Qué tipo de plaza es?</span><br>
+            <span style='color:#AAAAAA; font-size:12px;'>
+            Detectamos que tu ubicación está dentro de una plaza.</span>
+            </div>""", unsafe_allow_html=True)
+        tipo_plaza = st.radio(
+            "",
+            options=["strip_center", "mall", "no_plaza"],
+            format_func=lambda x: {
+                "strip_center": "🏪 Plaza abierta / Strip center",
+                "mall":         "🏬 Mall / Plaza cerrada",
+                "no_plaza":     "🚶 No es plaza — calle normal",
+            }.get(x, x),
+            key="tipo_plaza_radio",
+            horizontal=False,
+        )
+        if tipo_plaza == "no_plaza":
+            tipo_plaza = None
+
+# ── Info adicional para MALL (todos los tiers) ──────────────────────────────
+if tipo_plaza == "mall":
+    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
     col_m1, col_m2 = st.columns(2)
     with col_m1:
         zona_mall = st.selectbox(
-            "Zona dentro del mall:",
+            "📍 Zona dentro del mall:",
             options=["no_especificado","food_court","moda_accesorios","servicios",
                      "ancla_principal","planta_baja_entrada","piso_superior"],
             format_func=lambda x: {
-                "no_especificado":    "No especificado",
+                "no_especificado":    "No sé / no especificado",
                 "food_court":         "🍽️ Food court / zona de comida",
-                "moda_accesorios":    "👗 Moda / accesorios",
-                "servicios":          "💈 Servicios (peluquería, lavandería, etc.)",
+                "moda_accesorios":    "👗 Moda / accesorios / lifestyle",
+                "servicios":          "💈 Servicios (salud, belleza, etc.)",
                 "ancla_principal":    "⚓ Cerca de ancla (Liverpool, Walmart, Cine)",
                 "planta_baja_entrada":"🚪 Planta baja / entrada principal",
                 "piso_superior":      "⬆️ Piso superior / menor tráfico",
@@ -5101,36 +5157,54 @@ if tipo_plaza == "mall" and direccion_texto:
         )
     with col_m2:
         nivel_renta_mall = st.selectbox(
-            "Nivel de renta estimada:",
+            "💰 Nivel de renta estimada:",
             options=["desconocido","bajo","medio","alto","muy_alto"],
             format_func=lambda x: {
                 "desconocido": "No sé / no tengo dato",
-                "bajo":        "< $400/m² al mes",
-                "medio":       "$400–$800/m² al mes",
-                "alto":        "$800–$1,500/m² al mes",
-                "muy_alto":    "> $1,500/m² al mes",
+                "bajo":        "💚 Baja — < $400/m² mes",
+                "medio":       "🟡 Media — $400–$800/m² mes",
+                "alto":        "🟠 Alta — $800–$1,500/m² mes",
+                "muy_alto":    "🔴 Muy alta — > $1,500/m² mes",
             }.get(x, x),
             key="nivel_renta_mall",
         )
     st.session_state["zona_mall"] = zona_mall
     st.session_state["nivel_renta_mall"] = nivel_renta_mall
 
-elif tipo_plaza == "strip_center" and direccion_texto:
-    ancla_strip = st.selectbox(
-        "¿Hay una tienda ancla en la plaza?",
-        options=["sin_ancla","walmart","chedraui","soriana","oxxo","farmacias","banco","otra"],
-        format_func=lambda x: {
-            "sin_ancla":  "Sin ancla identificable",
-            "walmart":    "🛒 Walmart / Bodega Aurrerá / Sam's",
-            "chedraui":   "🛒 Chedraui / Superama",
-            "soriana":    "🛒 Soriana / Comercial Mexicana",
-            "oxxo":       "🏪 OXXO / tienda de conveniencia",
-            "farmacias":  "💊 Farmacia cadena (Similares, Benavides, etc.)",
-            "banco":      "🏦 Banco / cajero",
-            "otra":       "Otra tienda ancla",
-        }.get(x, x),
-        key="ancla_strip_select",
-    )
+elif tipo_plaza == "strip_center":
+    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+    _col_sc1, _col_sc2 = st.columns(2)
+    with _col_sc1:
+        ancla_strip = st.selectbox(
+            "⚓ ¿Hay una tienda ancla en la plaza?",
+            options=["sin_ancla","walmart","chedraui","soriana","oxxo","farmacias","banco","otra"],
+            format_func=lambda x: {
+                "sin_ancla":  "Sin ancla identificable",
+                "walmart":    "🛒 Walmart / Bodega Aurrerá / Sam's",
+                "chedraui":   "🛒 Chedraui / Superama",
+                "soriana":    "🛒 Soriana / Comercial Mexicana",
+                "oxxo":       "🏪 OXXO / tienda de conveniencia",
+                "farmacias":  "💊 Farmacia cadena (Similares, Benavides, etc.)",
+                "banco":      "🏦 Banco / cajero",
+                "otra":       "Otra tienda ancla",
+            }.get(x, x),
+            key="ancla_strip_select",
+        )
+    with _col_sc2:
+        _tips_ancla = {
+            "walmart":   "🛒 Flujo familiar constante — ideal para comida rápida, farmacia y servicios.",
+            "chedraui":  "🛒 NSE ligeramente más alto — funciona bien para café y papelería.",
+            "soriana":   "🛒 Buen flujo de compra semanal, similar a Chedraui.",
+            "oxxo":      "🏪 Muy alto tráfico de paso — ideal para comida y servicios rápidos.",
+            "farmacias": "💊 Clientela recurrente y de confianza — excelente para salud y nutrición.",
+            "banco":     "🏦 Genera cola de espera — clientes disponibles frente al local.",
+            "sin_ancla": "Sin ancla: el tráfico depende 100% de visibilidad exterior.",
+            "otra":      "Evalúa qué clientela atrae el ancla y si es compatible con tu negocio.",
+        }
+        if ancla_strip in _tips_ancla:
+            st.markdown(f"""<div style='background:#1A1A1A; border-left:3px solid #1A76D2;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#AAAAAA; margin-top:22px;'>
+                {_tips_ancla[ancla_strip]}</div>""", unsafe_allow_html=True)
     st.session_state["ancla_strip"] = ancla_strip
 
 # Guardar tipo_plaza en session_state para usarlo en el análisis
