@@ -282,6 +282,49 @@ fbq('track', 'PageView');
 src="https://www.facebook.com/tr?id={META_PIXEL_ID}&ev=PageView&noscript=1"/></noscript>
 """, unsafe_allow_html=True)
 
+# ============================================
+# META CONVERSIONS API (server-side)
+# ============================================
+try:
+    META_CAPI_TOKEN = st.secrets.get("META_CAPI_TOKEN", "")
+except:
+    META_CAPI_TOKEN = os.getenv("META_CAPI_TOKEN", "")
+
+def _meta_capi(event_name, value=None, currency="MXN", content_name=None, event_id=None):
+    """Envía evento a Meta Conversions API desde el servidor — no le afecta CSP ni bloqueadores."""
+    if not META_CAPI_TOKEN:
+        return
+    import time, hashlib, uuid
+    payload = {
+        "data": [{
+            "event_name": event_name,
+            "event_time": int(time.time()),
+            "event_id": event_id or str(uuid.uuid4()),
+            "action_source": "website",
+            "event_source_url": "https://4site-app-mx.streamlit.app",
+            "custom_data": {}
+        }]
+    }
+    if value is not None:
+        payload["data"][0]["custom_data"]["value"] = value
+        payload["data"][0]["custom_data"]["currency"] = currency
+    if content_name:
+        payload["data"][0]["custom_data"]["content_name"] = content_name
+    try:
+        requests.post(
+            f"https://graph.facebook.com/v18.0/{META_PIXEL_ID}/events",
+            params={"access_token": META_CAPI_TOKEN},
+            json=payload,
+            timeout=3
+        )
+    except Exception:
+        pass  # No bloquear la app si Meta falla
+
+# PageView al cargar (una vez por sesión)
+if "meta_pageview_sent" not in st.session_state:
+    _meta_capi("PageView")
+    st.session_state["meta_pageview_sent"] = True
+
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     CLAUDE_API_KEY = st.secrets["CLAUDE_API_KEY"]
@@ -5565,6 +5608,8 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
         "modo": modo, "tipo_negocio": tipo_negocio_seleccionado,
         "tipo_negocio_top1": tipo_negocio_top1, "idioma": idioma,
     }
+    # META CAPI — ViewContent: usuario generó un análisis
+    _meta_capi("ViewContent", content_name=f"{ubicacion[:50]} | score:{score:.0f}")
 
 # ── Recuperar resultados de session_state si existen ──────────────
 if "resultados" in st.session_state:
@@ -6552,7 +6597,8 @@ _components.html(f"""
         <div class="precio" style="color:#FFFFFF;">$99 <span>MXN</span></div>
         <div class="features">Análisis completo<br>Demografía<br>PDF 6 páginas</div>
       </div>
-      <a class="btn btn-basico" href="{STRIPE_BASICO}" target="_blank">Comprar →</a>
+      <a class="btn btn-basico" href="{STRIPE_BASICO}" target="_blank"
+         onclick="fetch('https://graph.facebook.com/v18.0/{META_PIXEL_ID}/events?access_token={META_CAPI_TOKEN}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{data:[{{event_name:'InitiateCheckout',event_time:Math.floor(Date.now()/1000),action_source:'website',custom_data:{{value:99,currency:'MXN',content_name:'Basico'}}}}]}})}})" >Comprar →</a>
     </div>
     <div class="card card-pro">
       <div>
@@ -6560,7 +6606,8 @@ _components.html(f"""
         <div class="precio" style="color:#BB944F;">$299 <span>MXN</span></div>
         <div class="features">Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
       </div>
-      <a class="btn btn-pro" href="{STRIPE_PRO}" target="_blank">Comprar →</a>
+      <a class="btn btn-pro" href="{STRIPE_PRO}" target="_blank"
+         onclick="fetch('https://graph.facebook.com/v18.0/{META_PIXEL_ID}/events?access_token={META_CAPI_TOKEN}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{data:[{{event_name:'InitiateCheckout',event_time:Math.floor(Date.now()/1000),action_source:'website',custom_data:{{value:299,currency:'MXN',content_name:'PRO'}}}}]}})}})" >Comprar →</a>
     </div>
     <div class="card card-premium">
       <div>
@@ -6568,7 +6615,8 @@ _components.html(f"""
         <div class="precio" style="color:#D4AF37;">$999 <span>MXN</span></div>
         <div class="features">ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
       </div>
-      <a class="btn btn-premium" href="{STRIPE_PREMIUM}" target="_blank">Comprar →</a>
+      <a class="btn btn-premium" href="{STRIPE_PREMIUM}" target="_blank"
+         onclick="fetch('https://graph.facebook.com/v18.0/{META_PIXEL_ID}/events?access_token={META_CAPI_TOKEN}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{data:[{{event_name:'InitiateCheckout',event_time:Math.floor(Date.now()/1000),action_source:'website',custom_data:{{value:999,currency:'MXN',content_name:'Premium'}}}}]}})}})" >Comprar →</a>
     </div>
   </div>
   <div class="footer">📧 hola@4site.mx</div>
