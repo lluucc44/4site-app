@@ -257,6 +257,31 @@ ga_script = f"""
 """
 st.markdown(ga_script, unsafe_allow_html=True)
 
+# ============================================
+# META PIXEL
+# ============================================
+try:
+    META_PIXEL_ID = st.secrets.get("META_PIXEL_ID", "1436219981860379")
+except:
+    META_PIXEL_ID = os.getenv("META_PIXEL_ID", "1436219981860379")
+
+st.markdown(f"""
+<script>
+!function(f,b,e,v,n,t,s)
+{{if(f.fbq)return;n=f.fbq=function(){{n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)}};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)}}(window, document,'script',
+'https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', '{META_PIXEL_ID}');
+fbq('track', 'PageView');
+</script>
+<noscript><img height="1" width="1" style="display:none"
+src="https://www.facebook.com/tr?id={META_PIXEL_ID}&ev=PageView&noscript=1"/></noscript>
+""", unsafe_allow_html=True)
+
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     CLAUDE_API_KEY = st.secrets["CLAUDE_API_KEY"]
@@ -6477,6 +6502,10 @@ if "resultados" in st.session_state:
         st.warning("Módulo PPTX no disponible. Instala: `pip install python-pptx`")
 
 # ── CTA BOTTOM ──────────────────────────────
+STRIPE_BASICO  = "https://buy.stripe.com/4gM28r66M5sD3Gqfmk5Rm02"
+STRIPE_PRO     = "https://buy.stripe.com/8x2eVd8eU3kv1yieig5Rm03"
+STRIPE_PREMIUM = "https://buy.stripe.com/3cI28r66M6wHgtca205Rm00"
+
 st.markdown("---")
 st.markdown(f"""
 <div style='text-align:center; padding:36px 40px; background:#0D0D0D;
@@ -6484,21 +6513,53 @@ st.markdown(f"""
     <div style='font-size:22px; font-weight:700; margin-bottom:6px;'>{t['cta_titulo']}</div>
     <div style='font-size:13px; color:#AAAAAA; margin-bottom:20px;'>{t['cta_intro']}</div>
     <div style='display:flex; justify-content:center; gap:16px; flex-wrap:wrap;'>
-        <div style='background:#1A1A1A; border:1px solid #333; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>BÁSICO</div>
-            <div style='font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:6px;'>$99 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Análisis completo<br>Demografía<br>PDF 6 páginas</div>
+
+        <div style='background:#1A1A1A; border:1px solid #333; border-radius:10px;
+             padding:16px 22px; min-width:180px; text-align:left;
+             display:flex; flex-direction:column; justify-content:space-between;'>
+            <div>
+                <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>BÁSICO</div>
+                <div style='font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:6px;'>$99 <span style='font-size:12px;color:#888;'>MXN</span></div>
+                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>Análisis completo<br>Demografía<br>PDF 6 páginas</div>
+            </div>
+            <a href='{STRIPE_BASICO}' target='_blank' style='display:block; text-align:center;
+                background:#333; color:#FFFFFF; font-size:11px; font-weight:700;
+                padding:8px 12px; border-radius:8px; text-decoration:none; letter-spacing:.05em;'>
+                Comprar →
+            </a>
         </div>
-        <div style='background:#1A1A1A; border:2px solid #BB944F; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PRO ⭐</div>
-            <div style='font-size:20px; font-weight:700; color:#BB944F; margin-bottom:6px;'>$299 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
+
+        <div style='background:#1A1A1A; border:2px solid #BB944F; border-radius:10px;
+             padding:16px 22px; min-width:180px; text-align:left;
+             display:flex; flex-direction:column; justify-content:space-between;'>
+            <div>
+                <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PRO ⭐</div>
+                <div style='font-size:20px; font-weight:700; color:#BB944F; margin-bottom:6px;'>$299 <span style='font-size:12px;color:#888;'>MXN</span></div>
+                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
+            </div>
+            <a href='{STRIPE_PRO}' target='_blank' style='display:block; text-align:center;
+                background:linear-gradient(135deg,#BB944F,#D4A85A); color:#0D0D0D;
+                font-size:11px; font-weight:700; padding:8px 12px; border-radius:8px;
+                text-decoration:none; letter-spacing:.05em;'>
+                Comprar →
+            </a>
         </div>
-        <div style='background:#1A1A1A; border:1px solid #555; border-radius:10px; padding:16px 22px; min-width:180px; text-align:left;'>
-            <div style='font-size:11px; color:#D4AF37; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PREMIUM 💎</div>
-            <div style='font-size:20px; font-weight:700; color:#D4AF37; margin-bottom:6px;'>$999 <span style='font-size:12px;color:#888;'>MXN</span></div>
-            <div style='font-size:11px; color:#AAAAAA; line-height:1.5;'>ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
+
+        <div style='background:#1A1A1A; border:1px solid #555; border-radius:10px;
+             padding:16px 22px; min-width:180px; text-align:left;
+             display:flex; flex-direction:column; justify-content:space-between;'>
+            <div>
+                <div style='font-size:11px; color:#D4AF37; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PREMIUM 💎</div>
+                <div style='font-size:20px; font-weight:700; color:#D4AF37; margin-bottom:6px;'>$999 <span style='font-size:12px;color:#888;'>MXN</span></div>
+                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
+            </div>
+            <a href='{STRIPE_PREMIUM}' target='_blank' style='display:block; text-align:center;
+                background:#333; color:#D4AF37; font-size:11px; font-weight:700;
+                padding:8px 12px; border-radius:8px; text-decoration:none; letter-spacing:.05em;'>
+                Comprar →
+            </a>
         </div>
+
     </div>
     <div style='margin-top:20px; font-size:12px; color:#666;'>📧 hola@4site.mx</div>
 </div>
