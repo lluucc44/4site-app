@@ -6507,63 +6507,76 @@ STRIPE_PRO     = "https://buy.stripe.com/8x2eVd8eU3kv1yieig5Rm03"
 STRIPE_PREMIUM = "https://buy.stripe.com/3cI28r66M6wHgtca205Rm00"
 
 st.markdown("---")
-st.markdown(f"""
-<div style='text-align:center; padding:36px 40px; background:#0D0D0D;
-     border-radius:16px; color:white; font-family:Montserrat,sans-serif;'>
-    <div style='font-size:22px; font-weight:700; margin-bottom:6px;'>{t['cta_titulo']}</div>
-    <div style='font-size:13px; color:#AAAAAA; margin-bottom:20px;'>{t['cta_intro']}</div>
-    <div style='display:flex; justify-content:center; gap:16px; flex-wrap:wrap;'>
 
-        <div style='background:#1A1A1A; border:1px solid #333; border-radius:10px;
-             padding:16px 22px; min-width:180px; text-align:left;
-             display:flex; flex-direction:column; justify-content:space-between;'>
-            <div>
-                <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>BÁSICO</div>
-                <div style='font-size:20px; font-weight:700; color:#FFFFFF; margin-bottom:6px;'>$99 <span style='font-size:12px;color:#888;'>MXN</span></div>
-                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>Análisis completo<br>Demografía<br>PDF 6 páginas</div>
-            </div>
-            <a href='{STRIPE_BASICO}' target='_blank' style='display:block; text-align:center;
-                background:#333; color:#FFFFFF; font-size:11px; font-weight:700;
-                padding:8px 12px; border-radius:8px; text-decoration:none; letter-spacing:.05em;'>
-                Comprar →
-            </a>
-        </div>
+_cta_titulo = t.get('cta_titulo', '🚀 ¿Quieres el análisis completo?')
+_cta_intro  = t.get('cta_intro',  'Upgrades disponibles:')
 
-        <div style='background:#1A1A1A; border:2px solid #BB944F; border-radius:10px;
-             padding:16px 22px; min-width:180px; text-align:left;
-             display:flex; flex-direction:column; justify-content:space-between;'>
-            <div>
-                <div style='font-size:11px; color:#BB944F; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PRO ⭐</div>
-                <div style='font-size:20px; font-weight:700; color:#BB944F; margin-bottom:6px;'>$299 <span style='font-size:12px;color:#888;'>MXN</span></div>
-                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
-            </div>
-            <a href='{STRIPE_PRO}' target='_blank' style='display:block; text-align:center;
-                background:linear-gradient(135deg,#BB944F,#D4A85A); color:#0D0D0D;
-                font-size:11px; font-weight:700; padding:8px 12px; border-radius:8px;
-                text-decoration:none; letter-spacing:.05em;'>
-                Comprar →
-            </a>
-        </div>
-
-        <div style='background:#1A1A1A; border:1px solid #555; border-radius:10px;
-             padding:16px 22px; min-width:180px; text-align:left;
-             display:flex; flex-direction:column; justify-content:space-between;'>
-            <div>
-                <div style='font-size:11px; color:#D4AF37; font-weight:700; letter-spacing:.08em; margin-bottom:6px;'>PREMIUM 💎</div>
-                <div style='font-size:20px; font-weight:700; color:#D4AF37; margin-bottom:6px;'>$999 <span style='font-size:12px;color:#888;'>MXN</span></div>
-                <div style='font-size:11px; color:#AAAAAA; line-height:1.8; margin-bottom:14px;'>ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
-            </div>
-            <a href='{STRIPE_PREMIUM}' target='_blank' style='display:block; text-align:center;
-                background:#333; color:#D4AF37; font-size:11px; font-weight:700;
-                padding:8px 12px; border-radius:8px; text-decoration:none; letter-spacing:.05em;'>
-                Comprar →
-            </a>
-        </div>
-
+import streamlit.components.v1 as _components
+_components.html(f"""
+<!DOCTYPE html>
+<html>
+<head>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: transparent; font-family: 'Montserrat', sans-serif; padding: 8px 0; }}
+  .wrap {{ text-align: center; padding: 36px 40px; background: #0D0D0D; border-radius: 16px; color: white; }}
+  .titulo {{ font-size: 22px; font-weight: 700; margin-bottom: 6px; }}
+  .intro  {{ font-size: 13px; color: #AAAAAA; margin-bottom: 20px; }}
+  .cards  {{ display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }}
+  .card {{ background: #1A1A1A; border-radius: 10px; padding: 16px 22px; min-width: 180px; max-width: 210px; text-align: left; display: flex; flex-direction: column; justify-content: space-between; }}
+  .card-basico  {{ border: 1px solid #333; }}
+  .card-pro     {{ border: 2px solid #BB944F; }}
+  .card-premium {{ border: 1px solid #555; }}
+  .tag {{ font-size: 11px; font-weight: 700; letter-spacing: .08em; margin-bottom: 6px; }}
+  .precio {{ font-size: 20px; font-weight: 700; margin-bottom: 6px; }}
+  .precio span {{ font-size: 12px; color: #888; }}
+  .features {{ font-size: 11px; color: #AAAAAA; line-height: 1.8; margin-bottom: 14px; }}
+  .btn {{ display: block; text-align: center; font-size: 11px; font-weight: 700; padding: 8px 12px; border-radius: 8px; text-decoration: none; letter-spacing: .05em; cursor: pointer; }}
+  .btn-basico  {{ background: #333; color: #FFFFFF; }}
+  .btn-basico:hover  {{ background: #444; }}
+  .btn-pro     {{ background: linear-gradient(135deg,#BB944F,#D4A85A); color: #0D0D0D; }}
+  .btn-premium {{ background: #333; color: #D4AF37; }}
+  .btn-premium:hover {{ background: #444; }}
+  .footer {{ margin-top: 20px; font-size: 12px; color: #666; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="titulo">{_cta_titulo}</div>
+  <div class="intro">{_cta_intro}</div>
+  <div class="cards">
+    <div class="card card-basico">
+      <div>
+        <div class="tag" style="color:#BB944F;">BÁSICO</div>
+        <div class="precio" style="color:#FFFFFF;">$99 <span>MXN</span></div>
+        <div class="features">Análisis completo<br>Demografía<br>PDF 6 páginas</div>
+      </div>
+      <a class="btn btn-basico" href="{STRIPE_BASICO}" target="_blank">Comprar →</a>
     </div>
-    <div style='margin-top:20px; font-size:12px; color:#666;'>📧 hola@4site.mx</div>
+    <div class="card card-pro">
+      <div>
+        <div class="tag" style="color:#BB944F;">PRO ⭐</div>
+        <div class="precio" style="color:#BB944F;">$299 <span>MXN</span></div>
+        <div class="features">Mapa competidores<br>Ticket promedio<br>Forecast + mercado</div>
+      </div>
+      <a class="btn btn-pro" href="{STRIPE_PRO}" target="_blank">Comprar →</a>
+    </div>
+    <div class="card card-premium">
+      <div>
+        <div class="tag" style="color:#D4AF37;">PREMIUM 💎</div>
+        <div class="precio" style="color:#D4AF37;">$999 <span>MXN</span></div>
+        <div class="features">ROI + comparativa<br>Ticket recomendado<br>Dashboard interactivo</div>
+      </div>
+      <a class="btn btn-premium" href="{STRIPE_PREMIUM}" target="_blank">Comprar →</a>
+    </div>
+  </div>
+  <div class="footer">📧 hola@4site.mx</div>
 </div>
-""", unsafe_allow_html=True)
+</body>
+</html>
+""", height=340, scrolling=False)
+
 
 st.markdown("---")
 st.markdown(f"""
