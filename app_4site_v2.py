@@ -298,14 +298,14 @@ def _meta_capi(event_name, value=None, currency="MXN", content_name=None, event_
         return
     import time, uuid
     payload = {
-        "data": [{{
+        "data": [{
             "event_name": event_name,
             "event_time": int(time.time()),
             "event_id": event_id or str(uuid.uuid4()),
             "action_source": "website",
             "event_source_url": "https://4site-app-mx.streamlit.app",
-            "custom_data": {{}}
-        }}]
+            "custom_data": {}
+        }]
     }
     if value is not None:
         payload["data"][0]["custom_data"]["value"] = value
@@ -316,8 +316,8 @@ def _meta_capi(event_name, value=None, currency="MXN", content_name=None, event_
         payload["test_event_code"] = META_TEST_CODE
     try:
         requests.post(
-            f"https://graph.facebook.com/v18.0/{META_PIXEL_ID}/events",
-            params={{"access_token": META_CAPI_TOKEN}},
+            "https://graph.facebook.com/v18.0/" + META_PIXEL_ID + "/events",
+            params={"access_token": META_CAPI_TOKEN},
             json=payload,
             timeout=3
         )
