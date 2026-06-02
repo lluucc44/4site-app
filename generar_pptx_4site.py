@@ -924,7 +924,7 @@ def _build_pptx(payload: dict) -> BytesIO | None:
         _pob_f=dem.get("poblacion_actual",0); _nse_f=dem.get("nse_predominante","C")
         _ing_f=dem.get("ingreso_actual",0); _tsa_f=dem.get("tasa_crecimiento_pct",0.55)
         _nc_f={"A":"7B1FA2","A/B":"9C27B0","B":"1976D2","B/C+":"0097A7","C+":"2E7D32","C":"558B2F","C/D+":"F57F17","D+":"E65100","D/E":"B71C1C"}.get(_nse_f,"1A76D2")
-        kpi(sl,0.3,0.98,3.0,f"{int(_pob_f):,}","Poblacion area",P["azul"] if 'P' in dir() else "1A76D2")
+        kpi(sl,0.3,0.98,3.0,f"{int(_pob_f):,}","Poblacion area","1A76D2")
         kpi(sl,3.5,0.98,3.0,_nse_f,"NSE Predominante",_nc_f)
         kpi(sl,6.7,0.98,3.0,f"${int(_ing_f):,}","Ingreso prom/mes",C["verde"])
         kpi(sl,9.9,0.98,3.1,f"{float(_tsa_f):.2f}%","Crec. anual",C["dorado"])
