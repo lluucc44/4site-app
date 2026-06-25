@@ -296,6 +296,61 @@ GASTO_POR_TIPO = {
     "default":            {"pct_gasto": 0.04,  "ticket_promedio": 200,  "visitas_mes": 5},
 }
 
+# ─────────────────────────────────────────────────────────────────
+# AJUSTE POR COLONIA — refina el dato municipal cuando se detecta una
+# colonia conocida vía Google Maps (sublocality/neighborhood).
+# factor_ingreso / factor_densidad se aplican multiplicando el dato
+# del municipio; nse sobreescribe el NSE del municipio si se indica.
+# Cobertura parcial: solo colonias de alto contraste socioeconómico
+# dentro de su municipio. Fuera de esta lista se usa el dato municipal.
+# ─────────────────────────────────────────────────────────────────
+COLONIAS_AJUSTE = {
+    # ── CDMX ──────────────────────────────────────────────────────
+    "polanco":              {"factor_ingreso": 1.9,  "factor_densidad": 0.85, "nse": "A/B"},
+    "lomas de chapultepec": {"factor_ingreso": 2.2,  "factor_densidad": 0.5,  "nse": "A"},
+    "condesa":              {"factor_ingreso": 1.5,  "factor_densidad": 1.1,  "nse": "A/B"},
+    "roma norte":           {"factor_ingreso": 1.5,  "factor_densidad": 1.15, "nse": "A/B"},
+    "roma sur":             {"factor_ingreso": 1.3,  "factor_densidad": 1.1,  "nse": "B"},
+    "santa fe":             {"factor_ingreso": 1.7,  "factor_densidad": 0.7,  "nse": "A/B"},
+    "del valle":            {"factor_ingreso": 1.4,  "factor_densidad": 1.05, "nse": "B"},
+    "narvarte":             {"factor_ingreso": 1.1,  "factor_densidad": 1.1,  "nse": "B/C+"},
+    "doctores":             {"factor_ingreso": 0.7,  "factor_densidad": 1.3,  "nse": "C/D+"},
+    "tepito":               {"factor_ingreso": 0.55, "factor_densidad": 1.4,  "nse": "D+"},
+    "iztapalapa centro":    {"factor_ingreso": 0.6,  "factor_densidad": 1.3,  "nse": "D+"},
+    "pedregal":             {"factor_ingreso": 1.8,  "factor_densidad": 0.6,  "nse": "A/B"},
+    "satelite":             {"factor_ingreso": 1.4,  "factor_densidad": 0.9,  "nse": "B"},
+    # ── Guadalajara / ZMG ────────────────────────────────────────
+    "providencia":          {"factor_ingreso": 1.6,  "factor_densidad": 0.9,  "nse": "A/B"},
+    "chapalita":            {"factor_ingreso": 1.4,  "factor_densidad": 0.95, "nse": "B"},
+    "americana":            {"factor_ingreso": 1.3,  "factor_densidad": 1.1,  "nse": "B"},
+    # ── Monterrey / ZMM ──────────────────────────────────────────
+    "san pedro":            {"factor_ingreso": 2.0,  "factor_densidad": 0.7,  "nse": "A/B"},
+    "del valle monterrey":  {"factor_ingreso": 1.7,  "factor_densidad": 0.85, "nse": "A/B"},
+    # ── Edomex / ZM Toluca ───────────────────────────────────────
+    "metepec centro":       {"factor_ingreso": 1.3,  "factor_densidad": 0.9,  "nse": "B/C+"},
+}
+
+
+def _aplicar_ajuste_colonia(datos_zona, colonia_norm):
+    """Aplica el factor de ajuste de COLONIAS_AJUSTE sobre datos_zona (copia)."""
+    if not colonia_norm:
+        return datos_zona, None
+    ajuste = COLONIAS_AJUSTE.get(colonia_norm)
+    if ajuste is None:
+        # match parcial: la colonia normalizada puede traer texto extra
+        for key in COLONIAS_AJUSTE:
+            if key in colonia_norm or colonia_norm in key:
+                ajuste = COLONIAS_AJUSTE[key]
+                break
+    if ajuste is None:
+        return datos_zona, None
+    ajustado = dict(datos_zona)
+    ajustado["ingreso"]  = int(datos_zona["ingreso"]  * ajuste.get("factor_ingreso", 1.0))
+    ajustado["densidad"] = int(datos_zona["densidad"] * ajuste.get("factor_densidad", 1.0))
+    if ajuste.get("nse"):
+        ajustado["nse"] = ajuste["nse"]
+    return ajustado, ajuste
+
 
 def proyectar_poblacion(poblacion_2020, tasa_anual, años=None):
     """Proyecta población desde Censo 2020 al año actual con crecimiento compuesto"""
@@ -320,36 +375,60 @@ def _normalizar(texto):
 
 def _resolver_municipio_desde_gmaps(lat, lng, gmaps_client):
     """
-    Usa Google Maps reverse geocoding para obtener municipio y estado exactos.
-    Retorna (municipio_normalizado, estado_normalizado, municipio_original, estado_original)
+    Usa Google Maps reverse geocoding para obtener municipio, estado y colonia exactos.
+    Retorna (municipio_normalizado, estado_normalizado, municipio_original,
+             estado_original, colonia_normalizada, colonia_original)
     """
     try:
-        result = gmaps_client.reverse_geocode((lat, lng))
-        if not result:
-            return None, None, None, None
+        results = gmaps_client.reverse_geocode((lat, lng))
+        if not results:
+            return None, None, None, None, None, None
 
         municipio_orig = None
+        locality_orig  = None
         estado_orig    = None
+        colonia_orig   = None
 
-        for component in result[0].get('address_components', []):
-            tipos = component.get('types', [])
-            nombre = component.get('long_name', '')
-            # administrative_area_level_2 = municipio en México
-            if 'administrative_area_level_2' in tipos:
-                municipio_orig = nombre
-            # administrative_area_level_1 = estado
-            if 'administrative_area_level_1' in tipos:
-                estado_orig = nombre
+        # Recorre todos los resultados (no solo el primero): en México,
+        # el municipio puede venir como administrative_area_level_2 en un
+        # resultado y como locality en otro, dependiendo de la zona.
+        for result in results:
+            for component in result.get('address_components', []):
+                tipos  = component.get('types', [])
+                nombre = component.get('long_name', '')
+                # administrative_area_level_2 = municipio en la mayoría de México
+                if municipio_orig is None and 'administrative_area_level_2' in tipos:
+                    municipio_orig = nombre
+                # locality = respaldo: algunas zonas (ej. Edomex) no traen
+                # administrative_area_level_2 y el municipio aparece aquí
+                if locality_orig is None and 'locality' in tipos:
+                    locality_orig = nombre
+                # administrative_area_level_1 = estado
+                if estado_orig is None and 'administrative_area_level_1' in tipos:
+                    estado_orig = nombre
+                # colonia: Google la marca como sublocality o neighborhood
+                if colonia_orig is None and (
+                    'sublocality' in tipos or 'sublocality_level_1' in tipos
+                    or 'neighborhood' in tipos
+                ):
+                    colonia_orig = nombre
+            if municipio_orig and estado_orig and colonia_orig:
+                break
+
+        if municipio_orig is None:
+            municipio_orig = locality_orig
 
         return (
             _normalizar(municipio_orig) if municipio_orig else None,
             _normalizar(estado_orig) if estado_orig else None,
             municipio_orig,
             estado_orig,
+            _normalizar(colonia_orig) if colonia_orig else None,
+            colonia_orig,
         )
     except Exception:
         pass
-    return None, None, None, None
+    return None, None, None, None, None, None
 
 
 def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
@@ -361,13 +440,15 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
       1. Google Maps reverse geocode → municipio exacto → MUNICIPIOS_MX
       2. Google Maps reverse geocode → estado → PROMEDIOS_ESTADO
       3. Fallback a promedio nacional "default"
+      4. Ajuste por colonia (COLONIAS_AJUSTE) sobre el resultado anterior,
+         si se detecta una colonia conocida vía Google Maps.
 
     Retorna dict con todos los indicadores.
     """
     años_proyeccion = AÑO_ACTUAL - AÑO_CENSO
 
-    # ── Paso 1: obtener municipio y estado via coordenadas ──────────
-    mun_norm, est_norm, mun_orig, est_orig = _resolver_municipio_desde_gmaps(
+    # ── Paso 1: obtener municipio, estado y colonia via coordenadas ──
+    mun_norm, est_norm, mun_orig, est_orig, col_norm, col_orig = _resolver_municipio_desde_gmaps(
         lat, lng, gmaps_client
     )
 
@@ -417,6 +498,11 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
     if datos_zona is None:
         datos_zona = MUNICIPIOS_MX["default"]
         fuente_str = "Estimación promedio nacional"
+
+    # ── Paso 5: ajuste por colonia (refina ingreso/densidad/NSE) ────
+    datos_zona, ajuste_colonia = _aplicar_ajuste_colonia(datos_zona, col_norm)
+    if ajuste_colonia:
+        fuente_str += f" · Ajuste por colonia {col_orig}"
 
     municipio_display = mun_orig or zona_key
     estado_display    = est_orig  or datos_zona.get("estado", "México")
