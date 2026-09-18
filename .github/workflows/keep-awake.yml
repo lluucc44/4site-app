@@ -1,0 +1,24 @@
+name: Mantener app de Streamlit despierta
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # cada 6 horas (en UTC) -> margen de sobra ante los 12 h de reposo
+  workflow_dispatch:          # botón para ejecutarlo a mano cuando quieras
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Playwright y Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visitar y despertar la app
+        run: python keep_awake.py
