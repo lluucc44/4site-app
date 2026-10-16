@@ -434,7 +434,7 @@ def _resolver_municipio_desde_gmaps(lat, lng, gmaps_client):
     return None, None, None, None, None, None
 
 
-def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
+def obtener_datos_inegi(lat, lng, direccion, gmaps_client, radio_m=500):
     """
     Obtiene datos demográficos enriquecidos del área.
     Fuente: tabla INEGI Censo 2020 + proyección CONAPO al año actual.
@@ -512,8 +512,9 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
     tasa              = datos_zona.get("tasa", 0.0055)
     años_proyeccion   = AÑO_ACTUAL - AÑO_CENSO
 
-    # ── Área de análisis: radio 500m (π × 0.5²) ──────────────────
-    area_km2 = 0.785
+    # ── Área de análisis: círculo del radio elegido (π × r²) ─────
+    radio_m  = radio_m or 500
+    area_km2 = math.pi * (radio_m / 1000.0) ** 2
 
     # Datos base Censo 2020
     densidad_2020   = datos_zona["densidad"]
@@ -543,6 +544,8 @@ def obtener_datos_inegi(lat, lng, direccion, gmaps_client):
         "estado":               estado_display,
         "fuente":               f"{fuente_str} · Proyección CONAPO {AÑO_ACTUAL}",
         "tasa_crecimiento_pct": round(tasa * 100, 2),
+        "radio_m":              radio_m,
+        "colonia":              col_orig,
         "años_proyectados":     años_proyeccion,
 
         # Población

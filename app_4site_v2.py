@@ -1427,12 +1427,12 @@ def detectar_contexto_ubicacion(lat, lng, direccion, tipo_negocio_key="cafe_prem
     return contexto
 
 
-def obtener_demografia(lat, lng, direccion=""):
+def obtener_demografia(lat, lng, direccion="", radio_m=500):
     """Wrapper — usa INEGI Engine si está disponible, fallback si no.
     La detección de municipio se hace por coordenadas (lat/lng), no por texto."""
     if MODULOS_OK and lat and lng:
         try:
-            return obtener_datos_inegi(lat, lng, direccion or "", gmaps)
+            return obtener_datos_inegi(lat, lng, direccion or "", gmaps, radio_m=radio_m)
         except:
             pass
     # Fallback básico
@@ -1466,7 +1466,8 @@ def obtener_demografia(lat, lng, direccion=""):
                         dem.update({"nse_predominante": "C/D+", "ingreso_promedio_mensual": 12000, "densidad_hab_km2": 9000})
     except:
         pass
-    area_km2 = 0.785
+    area_km2 = math.pi * ((radio_m or 500) / 1000.0) ** 2
+    dem["radio_m"] = radio_m or 500
     dem["poblacion_estimada"]  = int(dem["densidad_hab_km2"] * area_km2)
     dem["poblacion_actual"]    = dem["poblacion_estimada"]
     dem["viviendas_habitadas"] = int(dem["poblacion_estimada"] / 3.5)
@@ -1494,7 +1495,14 @@ def formatear_densidad(densidad_hab_km2):
 # FUNCIONES DE COMPETENCIA Y SCORING
 # ============================================
 
-def buscar_competencia_por_tipo(lat, lng, tipo_key, radio=500.0, tipo_plaza=None):
+def radio_efectivo_analisis(radio=None, tipo_plaza=None) -> int:
+    """Radio elegido por el usuario; si no eligió, default según tipo de plaza."""
+    if radio:
+        return int(radio)
+    return 1000 if tipo_plaza == "mall" else 600 if tipo_plaza == "strip_center" else 500
+
+
+def buscar_competencia_por_tipo(lat, lng, tipo_key, radio=None, tipo_plaza=None):
     """
     Busca competidores. Ajusta radio y max_results según tipo de plaza:
     - mall:         radio 1000m, más resultados (competencia interna relevante)
@@ -1505,16 +1513,9 @@ def buscar_competencia_por_tipo(lat, lng, tipo_key, radio=500.0, tipo_plaza=None
     included_types = TYPE_MAPPING.get(tipo_key, ["restaurant", "cafe", "store"])
     keywords = tipo.get("keywords", [])
 
-    # Ajustar radio según tipo de plaza
-    if tipo_plaza == "mall":
-        radio_efectivo = 1000.0
-        max_results    = 20
-    elif tipo_plaza == "strip_center":
-        radio_efectivo = 600.0
-        max_results    = 20
-    else:
-        radio_efectivo = float(radio)
-        max_results    = 20
+    # Radio: el que eligió el usuario; si no, default por tipo de plaza
+    radio_efectivo = float(radio_efectivo_analisis(radio, tipo_plaza))
+    max_results    = 20   # límite de Google Places searchNearby
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
     headers = {
@@ -1525,6 +1526,7 @@ def buscar_competencia_por_tipo(lat, lng, tipo_key, radio=500.0, tipo_plaza=None
     data = {
         "includedTypes": included_types,
         "maxResultCount": max_results,
+        "rankPreference": "DISTANCE",   # con radios grandes, trae los 20 más cercanos
         "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radio_efectivo}}
     }
     try:
@@ -1629,10 +1631,14 @@ def buscar_competencia_general(lat, lng):
     return []
 
 
-def calcular_score_competencia(competidores, tipo_key):
-    """Score metodológico: densidad 50% + calidad 30% + consolidación 20%"""
+def calcular_score_competencia(competidores, tipo_key, radio_m=500):
+    """Score metodológico: densidad 50% + calidad 30% + consolidación 20%
+    La densidad se normaliza a un círculo de 500 m, para que un radio mayor
+    no castigue el score solo por abarcar más área."""
     tipo  = TIPOS_NEGOCIO[tipo_key]
-    n     = len(competidores)
+    n_real = len(competidores)
+    radio_m = radio_m or 500
+    n     = n_real if radio_m == 500 else (max(1, round(n_real * (500.0 / radio_m) ** 2)) if n_real else 0)
     optimo = tipo["competencia_optima"]
 
     # Clasificar si es negocio de destino o de paso
@@ -1686,7 +1692,8 @@ def calcular_score_competencia(competidores, tipo_key):
 
     score_final = int(d*0.50 + q*0.30 + c_score*0.20)
     return score_final, {"densidad": int(d), "calidad": int(q), "consolidacion": int(c_score),
-                         "num_competidores": n, "rating_promedio": round(avg_r, 1) if avg_r else 0,
+                         "num_competidores": n_real, "competidores_equiv_500m": n,
+                         "radio_m": radio_m, "tope_google": n_real >= 20, "rating_promedio": round(avg_r, 1) if avg_r else 0,
                          "reseñas_promedio": int(avg_rv) if avg_rv else 0}
 
 
@@ -1986,16 +1993,41 @@ def nivel_score(score, idioma="es"):
     else:             return ("BAJO", "#E0524A") if idioma == "es" else ("LOW", "#E0524A")
 
 
-def recomendar_tipos_negocio(lat, lng, direccion):
-    # Usar cafe_casual como tipo base para detección vial inicial
-    # Se re-detectará con el top1 después de calcular recomendaciones
+def _contexto_para_tipo(contexto, tipo_key):
+    """Copia del contexto con el ajuste vial recalculado para ESTE giro
+    (el contexto base se detecta una sola vez; la dependencia al tráfico de paso cambia por giro)."""
+    av = (contexto or {}).get("analisis_vial")
+    if not av or av.get("tipo_vialidad") in (None, "desconocida"):
+        return contexto
+    ajuste, desc, _ = calcular_factor_vial(av["tipo_vialidad"], av.get("vialidad_cercana"), tipo_key)
+    dep = ("alto" if tipo_key in NEGOCIOS_PASO["alto"] else
+           "medio" if tipo_key in NEGOCIOS_PASO["medio"] else "bajo")
+    ctx = dict(contexto)
+    ctx["analisis_vial"] = dict(av, ajuste_score=ajuste, descripcion=desc or av.get("descripcion", ""),
+                                dependencia_paso=dep)
+    return ctx
+
+
+def recomendar_tipos_negocio(lat, lng, direccion, radio=None, tipo_plaza=None):
+    """Evalúa todos los giros en el punto. Las búsquedas de Places van en paralelo
+    y el ajuste vial se recalcula por giro."""
+    from concurrent.futures import ThreadPoolExecutor
+    radio_m = radio_efectivo_analisis(radio, tipo_plaza)
     contexto  = detectar_contexto_ubicacion(lat, lng, direccion, "cafe_casual")
-    demografia = obtener_demografia(lat, lng)
+    demografia = obtener_demografia(lat, lng, direccion, radio_m=radio_m)
+
+    tipos = list(TIPOS_NEGOCIO.keys())
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        comps_por_tipo = dict(zip(tipos, ex.map(
+            lambda k: buscar_competencia_por_tipo(lat, lng, k, radio=radio, tipo_plaza=tipo_plaza), tipos)))
+
     recomendaciones = []
-    for tipo_key, tipo_info in TIPOS_NEGOCIO.items():
-        comps = buscar_competencia_por_tipo(lat, lng, tipo_key)
-        score_base, desglose = calcular_score_competencia(comps, tipo_key)
-        score_ctx  = ajustar_score_por_contexto(score_base, tipo_key, contexto)
+    for tipo_key in tipos:
+        tipo_info = TIPOS_NEGOCIO[tipo_key]
+        comps = comps_por_tipo.get(tipo_key) or []
+        score_base, desglose = calcular_score_competencia(comps, tipo_key, radio_m)
+        ctx_t      = _contexto_para_tipo(contexto, tipo_key)
+        score_ctx  = ajustar_score_por_contexto(score_base, tipo_key, ctx_t)
         score_final = ajustar_score_por_demografia(score_ctx, tipo_key, demografia)
         recomendaciones.append({
             "tipo_key": tipo_key, "nombre": tipo_info["nombre"],
@@ -2005,15 +2037,23 @@ def recomendar_tipos_negocio(lat, lng, direccion):
             "inversion_max": tipo_info["inversion_max"],
             "descripcion": tipo_info["descripcion"],
             "competidores": comps,
+            # Componentes del score, para explicar "por qué" cada giro sube o baja
+            "comp_score": score_base,
+            "aj_contexto": score_ctx - score_base,
+            "aj_demografia": score_final - score_ctx,
+            "aj_vial": ((ctx_t or {}).get("analisis_vial") or {}).get("ajuste_score", 0),
+            # Índice sin tope de 100 (mismos ajustes medidos sobre base neutra) → desempata
+            "indice": score_base + (ajustar_score_por_contexto(50, tipo_key, ctx_t) - 50)
+                      + (ajustar_score_por_demografia(50, tipo_key, demografia) - 50),
         })
-    recomendaciones.sort(key=lambda x: x["score"], reverse=True)
+    recomendaciones.sort(key=lambda x: (x["score"], x["indice"]), reverse=True)
     return recomendaciones, contexto, demografia
 
 # ============================================
 # ANÁLISIS CLAUDE
 # ============================================
 
-def generar_analisis_claude(ubicacion, competidores, idioma, modo, tipo_negocio=None, recomendaciones=None, tipo_plaza=None, info_plaza=None, tipo_flujo="peatonal", tiene_estacionamiento=False):
+def generar_analisis_claude(ubicacion, competidores, idioma, modo, tipo_negocio=None, recomendaciones=None, tipo_plaza=None, info_plaza=None, tipo_flujo="peatonal", tiene_estacionamiento=False, radio_m=None):
     if modo == "validar":
         tipo_info = TIPOS_NEGOCIO[tipo_negocio]
         prompt = f"""Eres analista experto en ubicaciones comerciales para {tipo_info['nombre']}.
@@ -2025,7 +2065,7 @@ Inversión: ${tipo_info['inversion_min']:,}–${tipo_info['inversion_max']:,} MX
 {f"Zona en mall: {info_plaza.get('zona_mall','')}" if tipo_plaza == 'mall' and info_plaza else ""}
 {f"Nota de plaza: {info_plaza.get('nota','')}" if info_plaza and info_plaza.get('nota') else ""}
 
-Competencia en {500 if not tipo_plaza else (1000 if tipo_plaza == 'mall' else 600)}m ({len(competidores)} negocios similares):
+Competencia en {radio_m or radio_efectivo_analisis(None, tipo_plaza)}m ({len(competidores)} negocios similares):
 {json.dumps([{'nombre': c.get('displayName',{}).get('text','N/A'), 'rating': c.get('rating','N/A'), 'reviews': c.get('userRatingCount',0)} for c in competidores], indent=2, ensure_ascii=False)}
 
 {"INSTRUCCIÓN ESPECIAL MALL: Los competidores incluyen negocios del mismo mall. Esto tiene MAYOR peso que la competencia exterior. Analiza si la zona del mall (food court, moda, etc.) es favorable para este tipo de negocio y si la renta elevada impacta el ROI." if tipo_plaza == "mall" else ""}
@@ -2265,7 +2305,7 @@ SCORE DE VIABILIDAD: {score}/100 ({nivel_txt})
 - Calidad competencia: {desglose.get('calidad',0)}/100 (30%)
 - Consolidación mercado: {desglose.get('consolidacion',0)}/100 (20%)
 
-COMPETENCIA EN 500m:
+COMPETENCIA EN {(contexto or {}).get('radio_m', 500)}m:
 - Total competidores: {n_comp}
 - Rating promedio: {avg_rating}/5
 - Competidores excelentes (≥4.3★): {n_verdes}
@@ -3207,6 +3247,380 @@ def _portada_foto_canvas(output_canvas, ubicacion, score, tier_key,
 # BÚSQUEDA DE ZONA IDEAL — Opción A: cuadrícula de puntos
 # ════════════════════════════════════════════════════════════════
 
+def recomendaciones_ubicacion(tipo_negocio_key, nse="C", _mejor_comp_nombre="",
+                               _mejor_comp_rating=0.0, _mejor_comp_reviews=0):
+    """Guía de ubicación ideal para un giro (vialidad, visibilidad, estacionamiento,
+    plaza, competidor de referencia y tip por NSE). Extraída del motor de zonas."""
+    _recom_vialidad  = ""
+    _recom_visib     = ""
+    _recom_estac     = ""
+    _recom_plaza     = ""
+    _ref_comp_txt    = ""
+    _tip_nse_txt     = ""
+
+    _tipo_info_r = TIPOS_NEGOCIO.get(tipo_negocio_key, {})
+    _tipo_nombre_r = _tipo_info_r.get("nombre", "")
+
+    # Vialidad ideal — según dependencia de paso
+    _dep_paso = ("alto" if tipo_negocio_key in NEGOCIOS_PASO["alto"]
+                 else "medio" if tipo_negocio_key in NEGOCIOS_PASO["medio"] else "bajo")
+    if tipo_negocio_key in ("cafe_premium", "cafe_casual"):
+        _recom_vialidad = "Avenida de alto tráfico o vialidad principal. El café necesita flujo peatonal constante y visibilidad desde la calle."
+    elif tipo_negocio_key == "medicina_estetica":
+        _recom_vialidad = "Calle tranquila o avenida secundaria residencial. La medicina estética requiere ambiente discreto y aspiracional — evitar vialidades de alto ruido."
+    elif tipo_negocio_key == "nutricion":
+        _recom_vialidad = "Calle tranquila o avenida secundaria. Puede estar en planta alta o interior de plaza; el cliente va por recomendación o búsqueda activa."
+    elif tipo_negocio_key in ("comida_rapida", "empanadas_antojitos"):
+        _recom_vialidad = "Vialidad principal o avenida de alto tráfico. Máxima visibilidad y captación de tráfico de paso son esenciales para el modelo de alto volumen."
+    elif tipo_negocio_key in ("gimnasio_boutique", "gimnasio_regular", "yoga_wellness"):
+        _recom_vialidad = "Avenida secundaria con estacionamiento disponible. El cliente va a propósito — la accesibilidad vehicular importa más que la visibilidad de paso."
+    elif tipo_negocio_key in ("acabados_hogar", "ferreteria"):
+        _recom_vialidad = "Avenida secundaria o vialidad con acceso vehicular fácil y posibilidad de carga/descarga. El cliente lleva material — necesita espacio para maniobrar."
+    elif tipo_negocio_key == "farmacia":
+        _recom_vialidad = "Calle transitada o esquina de avenida. La farmacia necesita ser visible y accesible, idealmente con paso peatonal constante."
+    elif tipo_negocio_key == "restaurante_fino":
+        _recom_vialidad = "Calle tranquila o zona de restaurantes. El restaurante fino evita vialidades de ruido; el cliente lo busca, no lo descubre de paso."
+    else:
+        if _dep_paso == "alto":
+            _recom_vialidad = "Avenida o vialidad con tráfico constante. Este tipo de negocio depende del flujo de paso para captar clientes."
+        elif _dep_paso == "bajo":
+            _recom_vialidad = "Calle tranquila o interior de zona comercial. El cliente llega a propósito — la ubicación discreta reduce renta y no penaliza ventas."
+        else:
+            _recom_vialidad = "Avenida secundaria con buena visibilidad. Equilibrio entre accesibilidad y costo de renta."
+
+    # Visibilidad
+    if tipo_negocio_key in ("cafe_premium","cafe_casual","comida_rapida","empanadas_antojitos","panaderia","tienda_conveniencia","farmacia"):
+        _recom_visib = "Rotulación exterior visible a 50m mínimo. Google Maps con fotos actualizadas y horarios correctos. Escaparate o fachada que invite a entrar desde la banqueta."
+    elif tipo_negocio_key in ("medicina_estetica","nutricion","yoga_wellness","gimnasio_boutique"):
+        _recom_visib = "El cliente llega por búsqueda en Google y recomendación — prioriza una ficha de Google My Business impecable con fotos, reseñas y respuestas. La rotulación exterior puede ser discreta."
+    elif tipo_negocio_key in ("acabados_hogar","ferreteria"):
+        _recom_visib = "Muestra de producto visible desde la calle o vitrina de fachada. Los clientes buscan por referencia o Google Maps — asegura fotos actualizadas del local."
+    else:
+        _recom_visib = "Letrero visible desde la calle con nombre claro del negocio. Google Maps con fotos y reseñas actualizadas para captar búsquedas locales."
+
+    # Estacionamiento
+    if tipo_negocio_key in ("medicina_estetica","acabados_hogar","ferreteria","gimnasio_boutique","gimnasio_regular"):
+        _recom_estac = "Indispensable. El cliente lleva materiales, equipo o viene en auto desde lejos. Sin estacionamiento propio o público cercano, el negocio pierde clientes directamente."
+    elif tipo_negocio_key in ("cafe_premium","cafe_casual","restaurante_casual","restaurante_fino","bar"):
+        _recom_estac = "Conveniente. Un café o restaurante puede operar sin estacionamiento en zona de alto peatonal, pero perderá clientes en zonas suburbanas. Evalúa según el perfil de la zona."
+    elif tipo_negocio_key in ("comida_rapida","empanadas_antojitos","panaderia"):
+        _recom_estac = "No crítico si hay alto tráfico peatonal. En zona vehicular, un cajón o bahía de parada rápida mejora las ventas de paso."
+    else:
+        _recom_estac = "Verifica disponibilidad de cajones propios o estacionamiento público a menos de 100m. Es un factor que muchos emprendedores subestiman al firmar el contrato."
+
+    # Plaza comercial
+    if tipo_negocio_key in ("cafe_premium","cafe_casual","comida_rapida","empanadas_antojitos","panaderia","restaurante_casual"):
+        _recom_plaza = "Planta baja obligatorio, idealmente en food court o corredor gastronómico. En mall cerrado, la ubicación cerca de acceso principal o ancla multiplica el tráfico. Evitar piso superior."
+    elif tipo_negocio_key in ("medicina_estetica","nutricion","yoga_wellness","guarderia"):
+        _recom_plaza = "Puede ir en 2do piso o interior de plaza si el negocio tiene presencia digital fuerte. Reduce renta significativamente sin penalizar ventas — el cliente va a propósito."
+    elif tipo_negocio_key in ("farmacia","tienda_conveniencia","servicios"):
+        _recom_plaza = "Planta baja con acceso directo desde la calle. En plaza, posición cerca de la entrada o ancla principal. El tráfico de paso es la fuente principal de clientes."
+    elif tipo_negocio_key in ("acabados_hogar","ferreteria"):
+        _recom_plaza = "Strip center o bodega comercial con espacio para exhibición y carga. En mall cerrado no es el formato adecuado — el cliente necesita espacio y privacidad para decidir."
+    else:
+        _recom_plaza = "Planta baja preferible para visibilidad. Evalúa el tráfico real del corredor antes de firmar — no todas las plazas tienen flujo constante."
+
+    # Competidor de referencia
+    if _mejor_comp_nombre:
+        _ref_comp_txt = (f"'{_mejor_comp_nombre[:50]}' ({_mejor_comp_rating}★, {_mejor_comp_reviews} reseñas) "
+                         f"es el competidor mejor calificado en esta zona. Visítalo antes de abrir: "
+                         f"analiza su ticket, servicio, decoración y qué le falta.")
+
+    # Tip por NSE
+    _nse_z = nse
+    if tipo_negocio_key == "medicina_estetica":
+        if "A" in _nse_z or "B" in _nse_z:
+            _tip_nse_txt = f"NSE {_nse_z}: cliente de medicina estética espera instalaciones premium, marca personal del médico y discreción. Invierte en diseño de interiores y comunicación aspiracional."
+        else:
+            _tip_nse_txt = f"NSE {_nse_z}: considera un modelo de precios accesibles en tratamientos de entrada (depilación, limpiezas) antes de ofrecer procedimientos de alto costo."
+    elif tipo_negocio_key == "nutricion":
+        if "A" in _nse_z or "B" in _nse_z:
+            _tip_nse_txt = f"NSE {_nse_z}: cliente de nutrición en zona alta espera enfoque integral (bienestar, no solo dieta), horarios flexibles y plataforma digital para seguimiento."
+        elif "C+" in _nse_z:
+            _tip_nse_txt = f"NSE {_nse_z}: cliente C+ valora resultados concretos y precio accesible. Paquetes por sesiones con precio cerrado funcionan mejor que cobro por hora."
+        else:
+            _tip_nse_txt = f"NSE {_nse_z}: mercado más sensible al precio — considera alianza con gimnasios locales o consultas a domicilio para reducir barrera de entrada."
+    elif tipo_negocio_key == "empanadas_antojitos":
+        if "C" in _nse_z or "D" in _nse_z:
+            _tip_nse_txt = f"NSE {_nse_z}: tu cliente principal. Ticket de $30-80 MXN, combos visibles en menú exterior, pago en efectivo esencial, rápido y sabroso."
+        else:
+            _tip_nse_txt = f"NSE {_nse_z}: en zona de mayor ingreso, eleva la propuesta: ingredientes premium, nombre de marca, presentación cuidada y opciones vegetarianas/saludables."
+    elif "A" in _nse_z or "B" in _nse_z:
+        _tip_nse_txt = f"NSE {_nse_z}: zona de alto poder adquisitivo — prioriza calidad, experiencia y marca. El precio es secundario; la percepción de valor es lo que convierte."
+    elif "C+" in _nse_z:
+        _tip_nse_txt = f"NSE {_nse_z}: zona C+ — equilibrio precio-calidad. Propuesta clara, beneficios visibles y buen trato son los diferenciadores principales."
+    elif "C" in _nse_z and "C+" not in _nse_z:
+        _tip_nse_txt = f"NSE {_nse_z}: zona C estándar — el precio importa. Promos de lanzamiento, ticket accesible y presencia en WhatsApp Business aceleran la adopción inicial."
+    else:
+        _tip_nse_txt = f"NSE {_nse_z}: mercado sensible al precio. Volumen sobre margen. Evalúa si el ticket mínimo viable del negocio es compatible con el ingreso de la zona."
+
+    _recom_ubicacion = {
+        "vialidad_ideal":       _recom_vialidad,
+        "visibilidad":          _recom_visib,
+        "estacionamiento":      _recom_estac,
+        "plaza_recomendacion":  _recom_plaza,
+        "ref_competidor":       _ref_comp_txt,
+        "tip_nse":              _tip_nse_txt,
+    }
+    return _recom_ubicacion
+
+
+
+# ════════════════════════════════════════════════════════════════
+# ZONA POTENCIAL v2 — rejilla hexagonal (reemplaza a buscar_zona_ideal)
+# ════════════════════════════════════════════════════════════════
+# Costo por búsqueda (Google):
+#   1 geocode del punto de referencia
+#   19 Places searchNearby (uno por hexágono, en paralelo)
+#   N reverse geocodes de detalle (N = 4 PRO / 6 Premium)  →  ~24–26 llamadas
+# La demografía (tabla INEGI por municipio + ajuste por colonia) y la vialidad
+# de cada hexágono de detalle salen del MISMO reverse geocode (caché).
+
+class _GmapsCache:
+    """Envuelve el cliente de Google Maps y cachea reverse_geocode por coordenada."""
+    def __init__(self, client):
+        self._c = client
+        self._rg = {}
+
+    def reverse_geocode(self, latlng, *a, **kw):
+        key = (round(latlng[0], 5), round(latlng[1], 5))
+        if key not in self._rg:
+            self._rg[key] = self._c.reverse_geocode(latlng, *a, **kw)
+        return self._rg[key]
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def _hex_grid(lat, lng, radio_km, anillos=2):
+    """Centros y vértices de una rejilla hexagonal (pointy-top) que cubre el radio."""
+    s = radio_km / (anillos + 0.5)          # distancia entre centros (km)
+    r_hex = s / math.sqrt(3)                # circunradio del hexágono (km)
+    kx = 111.32 * math.cos(math.radians(lat))
+    ky = 111.32
+    celdas = []
+    for q in range(-anillos, anillos + 1):
+        for r in range(max(-anillos, -q - anillos), min(anillos, -q + anillos) + 1):
+            x = s * (q + r / 2.0)
+            y = s * (r * math.sqrt(3) / 2.0)
+            clat, clng = lat + y / ky, lng + x / kx
+            verts = []
+            for i in range(6):
+                ang = math.radians(60 * i - 30)
+                verts.append([clat + (r_hex * math.sin(ang)) / ky, clng + (r_hex * math.cos(ang)) / kx])
+            rumbo = ""
+            if math.hypot(x, y) > 0.05:
+                ang = (math.degrees(math.atan2(x, y)) + 360) % 360
+                rumbo = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][int((ang + 22.5) // 45) % 8]
+            celdas.append({"lat": clat, "lng": clng, "poly": verts, "rumbo": rumbo,
+                           "dist_km": round(math.hypot(x, y), 2)})
+    return celdas, r_hex
+
+
+def _categoria_zona(n_eq500, optimo, mejor_rating, mejor_reviews):
+    if n_eq500 == 0:
+        return "virgen"
+    if n_eq500 > optimo + 4:
+        return "saturada"
+    if mejor_rating >= 3.8 and mejor_reviews >= 30 and n_eq500 <= optimo + 2:
+        return "mercado_probado"
+    return "moderada"
+
+
+_BONO_CATEGORIA = {"mercado_probado": 12, "moderada": 0, "virgen": 3, "saturada": -8}
+CATEGORIA_LABEL = {
+    "mercado_probado": "Mercado probado",
+    "moderada":        "Competencia moderada",
+    "virgen":          "Zona virgen",
+    "saturada":        "Saturada",
+}
+
+
+def _vial_desde_geocode(geo, tipo_key):
+    """Clasifica la vialidad con el mismo reverse geocode (sin llamadas extra)."""
+    ruta = ""
+    for res in (geo or [])[:2]:
+        for comp in res.get("address_components", []):
+            if "route" in comp.get("types", []):
+                ruta = comp.get("long_name", "")
+                break
+        if ruta:
+            break
+    tipo_v = clasificar_vialidad_por_nombre(ruta) if ruta else "desconocida"
+    if tipo_v == "desconocida":
+        tipo_v = "avenida"
+    ajuste, desc, _ = calcular_factor_vial(tipo_v, None, tipo_key)
+    badge = {"principal": "🛣️", "avenida": "🚦", "local": "🏘️"}.get(tipo_v, "📍") + " " + (ruta or tipo_v.capitalize())
+    zona = {"principal": "paso", "avenida": "comercial", "local": "residencial"}.get(tipo_v, "comercial")
+    return {"tipo_vialidad": tipo_v, "ajuste_score": ajuste, "descripcion": desc,
+            "badge": badge, "ruta": ruta}, zona
+
+
+def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress=None):
+    """
+    Barrido en dos pasadas:
+      1) 19 hexágonos: competencia de Places → score preliminar + categoría.
+      2) Los n_detalle mejores: demografía (municipio/colonia) + vialidad → score final.
+    Devuelve dict con celdas, zonas (top detalladas, ordenadas por score) y competidores únicos.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    celdas, r_hex = _hex_grid(lat_ref, lng_ref, radio_km)
+    radio_busq = int(r_hex * 1000)
+    optimo = TIPOS_NEGOCIO[tipo_key]["competencia_optima"]
+
+    # ── Pasada 1: competencia por hexágono (en paralelo) ──
+    hechos = [0]
+    def _buscar(c):
+        res = buscar_competencia_por_tipo(c["lat"], c["lng"], tipo_key, radio=radio_busq)
+        hechos[0] += 1
+        return res
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        resultados = list(ex.map(_buscar, celdas))
+    if progress:
+        progress(0.7, "Competencia evaluada en 19 zonas…")
+
+    todos = {}
+    for c, comps in zip(celdas, resultados):
+        comps = comps or []
+        score_c, desg = calcular_score_competencia(comps, tipo_key, radio_busq)
+        mejor = max(comps, key=lambda x: ((x.get("rating") or 0) >= 3.8, x.get("userRatingCount") or 0), default=None)
+        mr = float((mejor or {}).get("rating") or 0)
+        mv = int((mejor or {}).get("userRatingCount") or 0)
+        cat = _categoria_zona(desg.get("competidores_equiv_500m", len(comps)), optimo, mr, mv)
+        if cat == "virgen":
+            # Sin competencia ≠ mejor zona: la demanda no está comprobada → tope por incertidumbre
+            score_c = min(score_c, 77)
+        c.update({
+            "n_comp": len(comps), "n_eq500": desg.get("competidores_equiv_500m", len(comps)),
+            "tope": len(comps) >= 20, "desglose": desg,
+            "categoria": cat,
+            "score_prelim": max(0, min(100, score_c + _BONO_CATEGORIA[cat])),
+            "indice": score_c + _BONO_CATEGORIA[cat],   # sin tope, para ordenar cuando hay empates en 100
+            "mejor": {"nombre": (mejor or {}).get("displayName", {}).get("text", ""), "rating": mr, "reviews": mv} if mejor else None,
+            "detallada": False,
+        })
+        c["score"] = c["score_prelim"]
+        for p in comps:
+            pid = p.get("id") or p.get("displayName", {}).get("text")
+            loc = p.get("location") or {}
+            if pid and loc.get("latitude") is not None and pid not in todos:
+                todos[pid] = {"nombre": p.get("displayName", {}).get("text", ""),
+                              "rating": float(p.get("rating") or 0) or None,
+                              "reviews": int(p.get("userRatingCount") or 0),
+                              "lat": loc["latitude"], "lng": loc["longitude"]}
+
+    # ── Pasada 2: detalle de las mejores ──
+    cand = sorted(celdas, key=lambda c: c["score_prelim"], reverse=True)[:n_detalle]
+    gm = _GmapsCache(gmaps)
+    def _detalle(c):
+        try:
+            geo = gm.reverse_geocode((c["lat"], c["lng"]))
+        except Exception:
+            geo = None
+        try:
+            dem = obtener_datos_inegi(c["lat"], c["lng"], "", gm, radio_m=500) if MODULOS_OK else {}
+        except Exception:
+            dem = {}
+        return geo, dem
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        detalles = list(ex.map(_detalle, cand))
+
+    for c, (geo, dem) in zip(cand, detalles):
+        av, zona = _vial_desde_geocode(geo, tipo_key)
+        ctx = {"tipo_zona": zona, "pois_cercanos": [], "analisis_vial": av}
+        s_ctx = ajustar_score_por_contexto(c["score_prelim"], tipo_key, ctx)
+        s_fin = ajustar_score_por_demografia(s_ctx, tipo_key, dem) if dem else s_ctx
+        # Mismos ajustes medidos sobre una base neutra (50) → aportación real sin el tope de 100
+        d_ctx = ajustar_score_por_contexto(50, tipo_key, ctx) - 50
+        d_dem = (ajustar_score_por_demografia(50, tipo_key, dem) - 50) if dem else 0
+        c["indice"] = c["indice"] + d_ctx + d_dem
+        colonia = dem.get("colonia") or ""
+        if not colonia and geo:
+            for comp in geo[0].get("address_components", []):
+                if any(t in comp.get("types", []) for t in ("sublocality_level_1", "sublocality", "neighborhood")):
+                    colonia = comp["long_name"]; break
+        mun = dem.get("municipio") or ""
+        c.update({
+            "detallada": True, "score": int(s_fin),
+            "aj_vial": d_ctx, "aj_demo": d_dem,
+            "vial": av, "colonia": colonia, "municipio": mun,
+            "nombre": ", ".join([x for x in (colonia, mun) if x]) or f"{c['lat']:.4f}, {c['lng']:.4f}",
+            "nse": dem.get("nse_predominante", "—"),
+            "ingreso": dem.get("ingreso_actual", 0),
+            "densidad": dem.get("densidad_actual", 0),
+            "poblacion": dem.get("poblacion_actual", 0),
+        })
+
+    # Orden: score final; como el score se topa en 100, desempata por tipo de mercado,
+    # score preliminar y cercanía a la referencia.
+    _prio = {"mercado_probado": 3, "moderada": 2, "virgen": 1, "saturada": 0}
+    zonas = sorted([c for c in celdas if c["detallada"]],
+                   key=lambda c: (c["score"], c["indice"], _prio[c["categoria"]], -c["dist_km"]), reverse=True)
+    # Nombres únicos: colonias repetidas se distinguen por rumbo y distancia
+    from collections import Counter
+    _rep = Counter(z["nombre"] for z in zonas)
+    for z in zonas:
+        if _rep[z["nombre"]] > 1 or not z.get("colonia"):
+            z["nombre"] = f"{z['nombre']} · {z['dist_km']} km {z['rumbo']}".strip() if z["rumbo"] else f"{z['nombre']} · centro"
+    for i, z in enumerate(zonas):
+        z["rank"] = i + 1
+        z["por_que"] = _por_que_zona(z, tipo_key, optimo)
+        m = z.get("mejor") or {}
+        z["recom"] = recomendaciones_ubicacion(tipo_key, z.get("nse", "C"),
+                                               m.get("nombre", ""), m.get("rating", 0), m.get("reviews", 0))
+    return {"celdas": celdas, "zonas": zonas, "competidores": list(todos.values()),
+            "radio_busq_m": radio_busq, "radio_km": radio_km,
+            "llamadas": len(celdas) + len(cand) + 1}
+
+
+def _por_que_zona(z, tipo_key, optimo):
+    """2–4 razones legibles de por qué la zona queda donde queda (sin IA)."""
+    out = []
+    cat = z["categoria"]; n = z["n_comp"]; m = z.get("mejor") or {}
+    if cat == "mercado_probado":
+        out.append(("+", f"Demanda comprobada: {m.get('nombre','un competidor')} ({m.get('rating')}★, {m.get('reviews')} reseñas) sin saturación ({n} competidores)."))
+    elif cat == "virgen":
+        out.append(("~", "Sin competencia directa: serías el primero, pero la demanda no está validada. Visita la zona en horario pico."))
+    elif cat == "saturada":
+        out.append(("−", f"Zona saturada: ≈{z['n_eq500']} competidores por cada 500 m (óptimo del giro: {optimo})."))
+    else:
+        out.append(("~", f"{n} competidores; ninguno domina con rating alto y muchas reseñas."))
+    if z.get("aj_vial"):
+        out.append(("+" if z["aj_vial"] > 0 else "−", f"{z['vial']['badge']}: {'+' if z['aj_vial']>0 else ''}{z['aj_vial']} pts por vialidad para este giro."))
+    if z.get("aj_demo"):
+        out.append(("+" if z["aj_demo"] > 0 else "−", f"NSE {z.get('nse')} e ingreso ${z.get('ingreso',0):,}: {'+' if z['aj_demo']>0 else ''}{z['aj_demo']} pts por perfil demográfico."))
+    if z.get("tope"):
+        out.append(("!", "Google devolvió el máximo (20): la competencia real podría ser mayor."))
+    return [{"s": s, "t": t} for s, t in out]
+
+
+def resumen_agente_zonas(zonas, tipo_nombre, ubicacion_ref, radio_km, idioma="es"):
+    """Una sola llamada a Claude para comparar las mejores zonas."""
+    if not zonas:
+        return ""
+    datos = [{
+        "rank": z["rank"], "zona": z["nombre"], "score": z["score"],
+        "categoria": CATEGORIA_LABEL[z["categoria"]], "competidores": z["n_comp"],
+        "mejor_competidor": z.get("mejor"), "nse": z.get("nse"), "ingreso": z.get("ingreso"),
+        "vialidad": (z.get("vial") or {}).get("badge"), "dist_km_ref": z["dist_km"],
+    } for z in zonas[:6]]
+    prompt = f"""Eres analista senior de expansión comercial en México. Un emprendedor busca dónde abrir un {tipo_nombre}
+en un radio de {radio_km} km alrededor de "{ubicacion_ref}". Estas son las zonas mejor evaluadas:
+{json.dumps(datos, ensure_ascii=False, indent=1)}
+
+Responde en {idioma} con este formato EXACTO (máx. 170 palabras, sin inventar datos):
+**Zona recomendada:** [nombre] — [1 línea de por qué]
+**Alternativa:** [nombre] — [cuándo conviene más que la primera]
+**Evitar:** [zona o patrón a evitar y por qué, 1 línea]
+**Siguiente paso:** [qué validar en campo antes de firmar, 1 línea]"""
+    try:
+        msg = claude.messages.create(model="claude-sonnet-4-5", max_tokens=500,
+                                     messages=[{"role": "user", "content": prompt}])
+        return msg.content[0].text
+    except Exception as e:
+        return f"No se pudo generar el resumen del agente: {e}"
+
+
 def buscar_zona_ideal(lat_ref: float, lng_ref: float, radio_km: float,
                       tipo_negocio_key: str, idioma: str = "es",
                       progress_callback=None) -> list:
@@ -3637,7 +4051,7 @@ def generar_pptx_zona_potencial(resultados, ubicacion_ref, radio_km,
         # Dirección
         txt(sl, res.get("direccion","")[:55], 0.92, y+0.06, 7.0, 0.3, sz=10, bold=True, col=C["oscuro"])
         # Categoria
-        cat = {"mercado_probado":"Mercado probado","compartir_mercado":"Compartir mercado",
+        cat = {"mercado_probado":"Mercado probado","compartir_mercado":"Compartir mercado","saturada":"Saturada",
                "virgen":"Zona virgen","moderada":"Zona moderada"}.get(res.get("zona_categoria",""), "")
         cat_c = C["verde"] if is_top3 else C["azul"]
         txt(sl, cat, 0.92, y+0.42, 3.5, 0.28, sz=8, col=cat_c, bold=True)
@@ -3724,14 +4138,14 @@ def generar_pptx_zona_potencial(resultados, ubicacion_ref, radio_km,
     sn += 1
     sl = prs.slides.add_slide(blank)
     bg_s(sl, C["gris_c"])
-    hdr(sl, "TOP 3 — Mercado Probado",
-        "Zonas con 1 competidor bien calificado (3.8+, 30+ resenas) — la demanda esta comprobada")
+    hdr(sl, "TOP 3 — Mejores zonas por score",
+        "Ranking por score final: competencia normalizada + tipo de mercado + NSE/colonia + vialidad para este giro")
 
     # Explicación metodología
     box(sl, 0.3, 0.78, 12.7, 0.52, "E8F8F0", C["verde"], 0.5)
     box(sl, 0.3, 0.78, 0.06, 0.52, C["verde"])
-    txt(sl, "Logica: 1 competidor fuerte en la zona = mercado existente que puedes capturar con propuesta superior. "
-           "El cliente ya tiene el habito — tu llegas con mejor calidad, precio o experiencia.",
+    txt(sl, "Mercado probado = hay un competidor bien calificado sin saturacion: la demanda existe y puedes capturarla con mejor propuesta. "
+           "Zona virgen = sin competencia; la demanda debe validarse en campo antes de invertir.",
         0.46, 0.84, 12.3, 0.4, sz=8.5, col="1A6B3C", it=True)
 
     if top3:
@@ -3750,12 +4164,12 @@ def generar_pptx_zona_potencial(resultados, ubicacion_ref, radio_km,
     sn += 1
     sl = prs.slides.add_slide(blank)
     bg_s(sl, C["gris_c"])
-    hdr(sl, "TOP 4-6 — Zonas Virgenes de Perfil Compatible",
-        "Sin competencia directa — perfil demografico y vial similar al entorno del mejor competidor del radio")
+    hdr(sl, "TOP 4-6 — Zonas alternativas",
+        "Siguientes zonas del ranking; la etiqueta indica si el mercado esta probado, es moderado o es virgen")
     box(sl, 0.3, 0.78, 12.7, 0.52, "EBF5FF", C["azul"], 0.5)
     box(sl, 0.3, 0.78, 0.06, 0.52, C["azul"])
-    txt(sl, "Logica: zonas sin competidores directos que comparten el perfil NSE, densidad y vialidad del entorno "
-           "de los mejores competidores encontrados. Alto potencial si se valida demanda en campo antes de invertir.",
+    txt(sl, "Utiles como plan B si la zona #1 no tiene locales disponibles o la renta no cierra. "
+           "Compara la etiqueta de mercado y el NSE antes de decidir.",
         0.46, 0.84, 12.3, 0.4, sz=8.5, col="1A4A7A", it=True)
 
     if top456:
@@ -3765,7 +4179,7 @@ def generar_pptx_zona_potencial(resultados, ubicacion_ref, radio_km,
             except Exception:
                 pass
     else:
-        txt(sl, "No se encontraron zonas virgenes con perfil compatible en el radio analizado.",
+        txt(sl, "No hay mas zonas detalladas en este plan / radio.",
             0.3, 1.5, 12.7, 0.4, sz=10, col=C["gris_t"], it=True)
     foot(sl, sn, total_slides)
 
@@ -5601,6 +6015,501 @@ def generar_pdf_por_tier(tier_key, **kwargs):
     else:
         return generar_pdf_free(**kwargs)
 
+
+# ============================================
+# DASHBOARD TIPO AGENTE — preparación de datos
+# ============================================
+try:
+    from dashboard_4site import (render_dashboard as _render_dashboard,
+                                 render_panel_agente as _render_panel_agente,
+                                 parsear_diagnostico as _parsear_diagnostico)
+    DASHBOARD_OK = True
+except Exception as _dash_err:
+    DASHBOARD_OK = False
+    _DASH_ERROR = str(_dash_err)
+
+
+def _haversine_m(lat1, lng1, lat2, lng2):
+    r = 6371000
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return int(2 * r * math.asin(math.sqrt(a)))
+
+
+def _isocronas_ors(lat, lng):
+    """Isócronas reales a pie (5/10/15 min) con openrouteservice; None si no hay key o falla."""
+    if not ORS_API_KEY:
+        return None
+    try:
+        r = requests.post(
+            "https://api.openrouteservice.org/v2/isochrones/foot-walking",
+            json={"locations": [[lng, lat]], "range": [300, 600, 900]},
+            headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def preparar_datos_dashboard(res: dict, tier_key: str) -> dict:
+    """
+    Calcula (una sola vez por análisis) todo lo que muestra el dashboard:
+    tráfico, mercado, forecast, ROI, ticket, recomendación final, isócronas,
+    competidores con distancia y candados por tier. Se cachea en session_state.
+    """
+    ubicacion = res["ubicacion"]; lat = res["lat"]; lng = res["lng"]
+    score = res["score"]; desglose = res.get("desglose") or {}
+    competidores = res.get("competidores") or []
+    contexto = res.get("contexto") or {}
+    demografia = res.get("demografia") or {}
+    recomendaciones = res.get("recomendaciones") or []
+    modo = res["modo"]; idioma = res["idioma"]
+    tipo_key = res.get("tipo_negocio") if modo == "validar" else (
+        res.get("tipo_negocio_top1") or (recomendaciones[0].get("tipo_key") if recomendaciones else None))
+
+    cache_key = hashlib.md5(
+        f"{ubicacion}|{lat:.6f}|{lng:.6f}|{score}|{tier_key}|{modo}|{tipo_key}|{res.get('radio_m')}".encode()
+    ).hexdigest()[:12]
+    cache = st.session_state.get("_dash_cache")
+    if cache and cache.get("key") == cache_key:
+        return cache["data"]
+
+    tier = TIERS[tier_key]
+    es_pro = tier_key in ("pro", "premium", "premium2")
+    tipo_info = TIPOS_NEGOCIO.get(tipo_key, {}) if tipo_key else {}
+
+    # ── Módulos de negocio ──
+    trafico = mercado = forecast = roi = ticket_raw = None
+    if MODULOS_OK and tipo_key:
+        try:
+            trafico = generar_reporte_trafico(
+                contexto.get("tipo_zona", "mixto"), tipo_key,
+                demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 8000)))
+        except Exception:
+            pass
+        try:
+            mercado = calcular_mercado_potencial(demografia, tipo_key, len(competidores), competidores)
+            forecast = generar_forecast(mercado, tipo_key, score, tipo_info.get("inversion_min", 300000))
+            roi = calcular_roi(forecast, tipo_info.get("inversion_min", 300000),
+                               tipo_info.get("inversion_max", 600000), tipo_key)
+        except Exception:
+            pass
+        if competidores:
+            try:
+                ticket_raw = calcular_ticket_competencia(competidores, tipo_key, score)
+            except Exception:
+                pass
+
+    ticket = dict(ticket_raw) if ticket_raw else None
+    _ov = _get_ticket_override(tipo_key or "")
+    if _ov:
+        ticket = ticket or {}
+        ticket.update(ticket_competencia=_ov["ticket_tipico"], rango_zona=_ov["rango_txt"],
+                      ticket_recomendado=int(_ov["ticket_tipico"] * 1.1))
+
+    # ── Recomendación final (Claude) — una vez por análisis ──
+    diag_texto = None
+    if tier_key != "free":
+        with st.spinner("🏆 El agente está integrando todos los datos…"):
+            diag_texto = generar_recomendacion_final(
+                ubicacion=ubicacion, score=score, desglose=desglose,
+                competidores=competidores, demografia=demografia,
+                contexto=contexto, idioma=idioma, tier_key=tier_key, modo=modo,
+                tipo_negocio=res.get("tipo_negocio") if modo == "validar" else None,
+                recomendaciones=recomendaciones,
+                trafico_data=trafico if es_pro else None,
+                mercado_data=mercado if es_pro else None,
+                forecast_data=forecast if es_pro else None,
+                roi_data=roi if es_pro else None,
+                ticket_data=ticket_raw,
+            )
+        st.session_state["_diagnostico_pptx"] = diag_texto
+    diag = _parsear_diagnostico(diag_texto or res.get("analisis") or "")
+
+    # Datos planos para el PPTX (mismo formato que la vista clásica)
+    if es_pro:
+        if trafico:
+            st.session_state["_trafico_data_pptx"] = {
+                k: trafico.get(k) for k in ("nivel_general", "dia_pico", "dia_bajo", "horas_pico", "trafico_horario")}
+        if mercado:
+            st.session_state["_mercado_data_pptx"] = {
+                "mercado_total": mercado.get("mercado_total_mensual", 0),
+                "mercado_capturable": mercado.get("mercado_captura_mensual", 0),
+                "clientes_potenciales_dia": mercado.get("clientes_dia_estimados", 0),
+                "penetracion_estimada_pct": mercado.get("factor_captura_pct", 15),
+            }
+        if forecast:
+            _esc = forecast.get("escenarios", {})
+            st.session_state["_forecast_data_pptx"] = {
+                "pesimista": _esc.get("pesimista", {}).get("promedio_mensual", 0),
+                "realista": _esc.get("base", {}).get("promedio_mensual", 0),
+                "optimista": _esc.get("optimista", {}).get("promedio_mensual", 0),
+                "nota": "; ".join(forecast.get("supuestos", [])[:2]),
+            }
+        if roi:
+            st.session_state["_roi_data_pptx"] = {
+                "inversion_min": roi.get("inversion_min", 0),
+                "inversion_max": roi.get("inversion_max", 0),
+                "retorno_mensual": roi.get("utilidad_mensual_est", 0),
+                "meses_recuperacion_realista": roi.get("meses_recuperacion", "—"),
+                "roi_anual_pct": roi.get("roi_12m_pct", "—"),
+            }
+
+    # ── Candados por tier ──
+    locks = {
+        "desglose":      False if tier["muestra_score_desglose"] else "Básico",
+        "demografia":    False if tier["muestra_demografia"] else "Básico",
+        "comp_mapa":     "Básico" if tier_key == "free" else False,
+        "mapa_avanzado": False if tier["muestra_mapa_comp"] else "PRO",
+        "trafico":       False if es_pro else "PRO",
+        "ticket":        False if es_pro else "PRO",
+        "mercado":       False if tier["muestra_mercado"] else "PRO",
+        "forecast":      False if tier["muestra_forecast"] else "PRO",
+        "roi":           False if tier["muestra_roi"] else "Premium",
+        "diag_parcial":  tier_key == "free",
+    }
+
+    # ── Radio efectivo ──
+    _tp = contexto.get("tipo_plaza")
+    radio_m = res.get("radio_m") or contexto.get("radio_m") or radio_efectivo_analisis(None, _tp)
+
+    # ── Competidores con distancia ──
+    def _comps_con_dist(lista):
+        out = []
+        for c in lista or []:
+            loc = c.get("location") or {}
+            if loc.get("latitude") is None:
+                continue
+            out.append({
+                "nombre": c.get("displayName", {}).get("text", "N/A"),
+                "rating": float(c.get("rating") or 0) or None,
+                "reviews": int(c.get("userRatingCount") or 0),
+                "lat": loc["latitude"], "lng": loc["longitude"],
+                "dist": _haversine_m(lat, lng, loc["latitude"], loc["longitude"]),
+            })
+        out.sort(key=lambda c: c["dist"])
+        return out
+    comps = _comps_con_dist(competidores)
+    comp_visibles = {"free": 3}.get(tier_key, tier["competidores_mostrados"])
+    if tier_key == "free":
+        comps_mapa = comps[:comp_visibles]   # nunca mandamos al navegador lo que no se ve
+    else:
+        comps_mapa = comps
+
+    # ── KPIs ──
+    nivel_txt, _ = nivel_score(score, idioma)
+    dens = demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 0))
+    ingreso = demografia.get("ingreso_actual", demografia.get("ingreso_promedio_mensual", 0))
+
+    def _m(n):
+        try:
+            n = float(n)
+        except Exception:
+            return "—"
+        if not n:
+            return "—"
+        return f"${n/1e6:.2f}M" if n >= 1e6 else f"${n/1e3:.0f}K" if n >= 1e4 else f"${n:,.0f}"
+
+    def kpi(k, v, n="", lock=False, c=None):
+        return {"k": k, "v": v, "n": n, "lock": lock or False, "c": c}
+
+    _esc_base = (forecast or {}).get("escenarios", {}).get("base", {})
+    kpis = [
+        kpi("Competidores", f"{len(competidores)}{'+' if len(competidores) >= 20 else ''}",
+            f"en {radio_m:,} m" + (f" · ≈{desglose.get('competidores_equiv_500m')} por 500 m" if radio_m != 500 and desglose.get('competidores_equiv_500m') is not None else "")),
+        kpi("Población", f"{demografia.get('poblacion_actual', demografia.get('poblacion_estimada', 0)):,}", f"hab. en {demografia.get('radio_m', 500):,} m (INEGI)"),
+        kpi("Densidad", f"{int(dens):,}", "hab/km²"),
+        kpi("NSE", demografia.get("nse_predominante", "—"), "predominante", locks["demografia"]),
+        kpi("Ingreso prom.", _m(ingreso), "por hogar/mes", locks["demografia"]),
+        kpi("Ticket zona", _m((ticket or {}).get("ticket_competencia")), (ticket or {}).get("rango_zona", "")[:28], locks["ticket"]),
+        kpi("Mercado capturable", _m((mercado or {}).get("mercado_captura_mensual")), f"{(mercado or {}).get('factor_captura_pct', 0):.0f}% del total/mes", locks["mercado"]),
+        kpi("Clientes/día", f"{(mercado or {}).get('clientes_dia_estimados', '—')}", "estimados", locks["mercado"]),
+        kpi("Venta base/mes", _m(_esc_base.get("promedio_mensual")), "forecast escenario base", locks["forecast"]),
+        kpi("Venta año 1", _m(_esc_base.get("total_anual")), "escenario base", locks["forecast"]),
+        kpi("ROI 12 meses", f"{(roi or {}).get('roi_12m_pct', '—')}%", (roi or {}).get("clasificacion_roi", "")[:28], locks["roi"],
+            "#1F9D57" if (roi or {}).get("roi_12m_pct", 0) and float((roi or {}).get("roi_12m_pct", 0)) > 0 else None),
+        kpi("Recuperación", f"{(roi or {}).get('meses_recuperacion', '—')} meses", f"P. equilibrio {_m((roi or {}).get('punto_eq_ventas_mes'))}/mes", locks["roi"]),
+    ]
+
+    # ── Ajustes del score (visibles para explicar el número) ──
+    ajustes = []
+    _av = contexto.get("analisis_vial") or {}
+    if _av.get("ajuste_score"):
+        ajustes.append({"l": "Vialidad", "v": int(_av["ajuste_score"])})
+
+    # ── Tráfico ──
+    traf = None
+    if trafico:
+        traf = {
+            "horario": trafico.get("trafico_horario", []),
+            "semanal": trafico.get("trafico_semanal", []),
+            "picos": [p.get("hora_str", "") for p in trafico.get("horas_pico", [])],
+            "nivel": trafico.get("nivel_general", ""),
+            "dia_pico": trafico.get("dia_pico", ""),
+        }
+
+    # ── Ranking de giros (modo recomendar): cada giro con su mapa y su "por qué" ──
+    ranking, ocultos, giros = [], 0, []
+    _nse_z = demografia.get("nse_predominante", "—")
+    if modo == "recomendar" and recomendaciones:
+        n = tier["top_negocios"]
+        for r in recomendaciones[:n]:
+            nom = re.sub(r"^[^\wÁÉÍÓÚÑáéíóúñ]+", "", r["nombre"]).strip()
+            dg = r.get("desglose") or {}
+            razones = []
+            if dg.get("densidad", 0) >= 80:
+                razones.append((abs(dg["densidad"] - 60), "+", f"Poca competencia: {r['num_competidores']} en {radio_m:,} m"))
+            elif dg.get("densidad", 100) <= 45:
+                razones.append((abs(dg["densidad"] - 60), "−", f"Zona competida: {r['num_competidores']} en {radio_m:,} m"))
+            if dg.get("calidad", 0) >= 80:
+                razones.append((15, "+", "Competidores con rating bajo: espacio para ser el mejor"))
+            elif r["num_competidores"] and dg.get("calidad", 100) <= 20:
+                razones.append((15, "−", "La competencia está muy bien calificada (≥4.3★)"))
+            if r.get("aj_vial"):
+                razones.append((abs(r["aj_vial"]), "+" if r["aj_vial"] > 0 else "−",
+                                f"Vialidad: {'+' if r['aj_vial'] > 0 else ''}{r['aj_vial']} pts para este giro"))
+            if r.get("aj_demografia"):
+                razones.append((abs(r["aj_demografia"]), "+" if r["aj_demografia"] > 0 else "−",
+                                f"Perfil NSE {_nse_z}: {'+' if r['aj_demografia'] > 0 else ''}{r['aj_demografia']} pts"))
+            razones.sort(key=lambda x: -x[0])
+            _niv, _ = nivel_score(r["score"], idioma)
+            giros.append({
+                "nombre": nom, "score": int(r["score"]), "nivel": _niv,
+                "desglose": {k: dg.get(k, 0) for k in ("densidad", "calidad", "consolidacion")},
+                "competidores": _comps_con_dist(r.get("competidores")),
+                "n_competidores": r["num_competidores"], "equiv_500": dg.get("competidores_equiv_500m"),
+                "por_que": [{"s": sg, "t": tx} for _, sg, tx in razones[:3]],
+            })
+            ranking.append({"nombre": nom, "score": int(r["score"])})
+        ocultos = max(len(recomendaciones) - n, 0)
+
+    # ── Palancas (modo validar): qué subiría el score, con las mismas reglas ──
+    palancas = []
+    if modo == "validar" and tipo_key and tier_key != "free":
+        _sc = int(score)
+        _av_act = (contexto.get("analisis_vial") or {}).get("ajuste_score", 0)
+        _mejor_vial = max((calcular_factor_vial(tv, None, tipo_key)[0], tv) for tv in ("principal", "avenida", "local"))
+        if _mejor_vial[0] > _av_act:
+            palancas.append({"l": {"principal": "Local sobre vialidad principal", "avenida": "Local sobre avenida",
+                                   "local": "Local en calle tranquila"}[_mejor_vial[1]],
+                             "v": min(100, _sc + _mejor_vial[0] - _av_act) - _sc})
+        _flujo = contexto.get("tipo_flujo", "peatonal")
+        if not contexto.get("tiene_estacionamiento") and _flujo != "peatonal":
+            _d = (ajustar_score_por_acceso_vehicular(_sc, tipo_key, _flujo, True)[0]
+                  - ajustar_score_por_acceso_vehicular(_sc, tipo_key, _flujo, False)[0])
+            if _d > 0:
+                palancas.append({"l": "Cajones de estacionamiento propios", "v": _d})
+        if not _tp:
+            _d = ajustar_score_por_plaza(_sc, tipo_key, "strip_center", ancla="walmart")[0] - _sc
+            if _d > 0:
+                palancas.append({"l": "Strip center con supermercado ancla", "v": _d})
+        palancas = sorted([p for p in palancas if p["v"] > 0], key=lambda p: -p["v"])[:4]
+
+    _perfil = get_perfil_captacion(tipo_key or "")
+    _dg = demografia.get("distribucion_genero") or {}
+
+    data = {
+        "id": cache_key,
+        "ubicacion": ubicacion, "lat": lat, "lng": lng,
+        "modo": modo,
+        "tipo_nombre": re.sub(r"^[^\wÁÉÍÓÚÑáéíóúñ]+", "", tipo_info.get("nombre", "")).strip(),
+        "tier_nombre": tier["nombre"],
+        "score": int(score), "nivel": nivel_txt,
+        "desglose": {k: desglose.get(k, 0) for k in ("densidad", "calidad", "consolidacion")} if not locks["desglose"] else {},
+        "ajustes": ajustes,
+        "radio_m": radio_m,
+        "equiv_500": desglose.get("competidores_equiv_500m"),
+        "n_competidores": len(competidores),
+        "competidores": comps_mapa,
+        "comp_visibles": comp_visibles,
+        "kpis": kpis,
+        "trafico": traf,
+        "demo": {} if locks["demografia"] else {
+            "nse": demografia.get("nse_predominante"), "ingreso": ingreso,
+            "edad": demografia.get("distribucion_edad") or {},
+            "mujeres": _dg.get("mujeres"), "hombres": _dg.get("hombres"),
+        },
+        "isocronas": _isocronas_ors(lat, lng) if not locks["mapa_avanzado"] else None,
+        "diag": diag,
+        "vial": {"badge": _av.get("badge"), "descripcion": _av.get("descripcion")} if _av else {},
+        "perfil_cap": PERFIL_CAPTACION_LABELS.get(_perfil, ("",))[0],
+        "nota_vehicular": contexto.get("nota_vehicular", ""),
+        "plaza_label": {"mall": "🏬 Mall", "strip_center": "🏪 Strip center"}.get(_tp, ""),
+        "ranking": ranking, "ranking_ocultos": ocultos, "giros": giros, "palancas": palancas,
+        "locks": locks,
+        # Solo para el agente (no se muestran tal cual)
+        "_diag_texto": diag_texto,
+        "analisis_competencia": res.get("analisis") if tier_key != "free" else None,
+        "_ticket_raw": ticket if not locks["ticket"] else None,
+        "_mercado_raw": {k: (mercado or {}).get(k) for k in ("mercado_total_mensual", "mercado_captura_mensual", "clientes_dia_estimados", "ticket_promedio")} if mercado and not locks["mercado"] else None,
+        "_forecast_raw": {k: v.get("promedio_mensual") for k, v in (forecast or {}).get("escenarios", {}).items()} if forecast and not locks["forecast"] else None,
+        "_roi_raw": {k: (roi or {}).get(k) for k in ("roi_12m_pct", "meses_recuperacion", "utilidad_mensual_est", "punto_eq_ventas_mes")} if roi and not locks["roi"] else None,
+    }
+    # Lo bloqueado no viaja al navegador con valores reales (solo placeholder borroso)
+    for _k in data["kpis"]:
+        if _k["lock"]:
+            _k["v"], _k["n"] = "", ""
+    if locks["trafico"] and data["trafico"]:
+        data["trafico"] = {"horario": [5,3,2,2,3,10,30,55,70,65,60,65,80,80,65,60,65,75,85,75,55,40,25,10],
+                           "semanal": [80,80,85,85,95,100,70], "picos": ["00:00–00:00", "00:00–00:00"],
+                           "nivel": "", "dia_pico": "—"}
+    st.session_state["_dash_cache"] = {"key": cache_key, "data": data}
+    return data
+
+
+def _datos_para_navegador(data: dict) -> dict:
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+
+# ============================================
+# MODO ZONA POTENCIAL — UI
+# ============================================
+try:
+    from dashboard_4site import render_dashboard_zona as _render_dashboard_zona, construir_html_zona as _html_zona
+except Exception:
+    _render_dashboard_zona = None
+
+
+def _validar_zona_cb(z, tipo_key, tier_key):
+    """Botón 'Validar esta zona': cambia a modo validar con el giro y corre el análisis en ese punto."""
+    st.session_state[f"modo_sel_{tier_key}"] = "validar"
+    st.session_state["tipo_validar"] = tipo_key
+    st.session_state["_coords_forzadas"] = (z["lat"], z["lng"], z["nombre"])
+    st.session_state["_auto_analizar"] = True
+    st.session_state.pop("resultados", None)
+
+
+def _parsear_agente_zona(txt):
+    out = []
+    for linea in (txt or "").split("\n"):
+        m = re.match(r"\s*\*\*(.+?):\*\*\s*(.+)", linea.strip())
+        if m:
+            out.append({"t": m.group(1).strip(), "v": m.group(2).strip()})
+    if not out and txt:
+        out.append({"t": "Resumen", "v": re.sub(r"\*\*", "", txt)[:500]})
+    return out
+
+
+def render_modo_zona(tier_key, idioma):
+    es_premium = tier_key in ("premium", "premium2")
+    radios = [1, 2, 3, 5] if es_premium else [1, 2, 3]
+    n_det = 6 if es_premium else 4
+
+    st.markdown("### 🔍 Descubrir zona con potencial")
+    st.caption("Elige un giro y un punto de referencia. Barremos el radio en 19 zonas hexagonales, "
+               "evaluamos la competencia en cada una y detallamos las mejores con demografía y vialidad.")
+    c1, c2, c3 = st.columns([2.2, 1.7, 1.2])
+    with c1:
+        dir_ref = st.text_input("📍 Punto de referencia", key="zona_ref",
+                                placeholder="Ej: Metepec centro, o tu colonia de interés")
+    with c2:
+        tipo_z = st.selectbox("Giro", list(TIPOS_NEGOCIO.keys()),
+                              format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"], key="zona_tipo")
+    with c3:
+        radio_km = st.select_slider("Radio", options=radios, value=3, format_func=lambda x: f"{x} km",
+                                    key=f"zona_radio_{tier_key}")
+    hex_m = int(radio_km / 2.5 / math.sqrt(3) * 1000)
+    st.caption(f"Hexágonos de ~{hex_m*2:,} m · se detallan las {n_det} mejores · ~{19 + n_det + 1} consultas a Google · 15–30 seg"
+               + ("" if es_premium else " · 🔒 Radio de 5 km y 6 zonas detalladas en Premium"))
+
+    if st.button("🗺️ Buscar zonas con potencial", type="primary", use_container_width=True, key="btn_zona"):
+        if not dir_ref.strip():
+            st.warning("Escribe un punto de referencia.")
+        else:
+            lat_r, lng_r = geocodificar_direccion(dir_ref)
+            if not lat_r:
+                st.error("No pude ubicar esa referencia. Prueba con colonia y municipio.")
+            else:
+                barra = st.progress(0.05, text="Armando la rejilla de zonas…")
+                try:
+                    res = buscar_zonas_hex(lat_r, lng_r, radio_km, tipo_z, n_detalle=n_det,
+                                           progress=lambda f, t: barra.progress(f, text=t))
+                    barra.progress(0.9, text="El agente está comparando las mejores zonas…")
+                    tipo_nom = TIPOS_NEGOCIO[tipo_z]["nombre"]
+                    agente_txt = resumen_agente_zonas(res["zonas"], tipo_nom, dir_ref, radio_km, idioma)
+                finally:
+                    barra.empty()
+                st.session_state["zona_res"] = {
+                    "res": res, "ref": dir_ref, "lat": lat_r, "lng": lng_r, "tipo": tipo_z,
+                    "radio_km": radio_km, "agente_txt": agente_txt,
+                    "id": hashlib.md5(f"{lat_r}{lng_r}{tipo_z}{radio_km}".encode()).hexdigest()[:10],
+                }
+                _meta_capi("ViewContent", content_name=f"zona:{dir_ref[:40]}")
+
+    zr = st.session_state.get("zona_res")
+    if not zr:
+        return
+    res = zr["res"]
+    tipo_nom = re.sub(r"^[^\wÁÉÍÓÚÑáéíóúñ]+", "", TIPOS_NEGOCIO[zr["tipo"]]["nombre"]).strip()
+    zonas = res["zonas"]
+    data = {
+        "id": "zona_" + zr["id"], "modo": "zona",
+        "ubicacion": zr["ref"], "lat": zr["lat"], "lng": zr["lng"], "radio_km": zr["radio_km"],
+        "tipo_nombre": tipo_nom, "tier_nombre": TIERS[tier_key]["nombre"],
+        "celdas": [{k: c.get(k) for k in ("lat", "lng", "poly", "score", "categoria", "n_comp", "tope",
+                                          "detallada", "nombre", "dist_km")} for c in res["celdas"]],
+        "zonas": zonas, "zonas_ocultas": 0 if es_premium else 0,
+        "competidores": res["competidores"], "n_competidores": len(res["competidores"]),
+        "hex_m": res["radio_busq_m"], "llamadas": res["llamadas"],
+        "agente": _parsear_agente_zona(zr["agente_txt"]),
+    }
+
+    st.markdown("""<style>.main .block-container,[data-testid="stMainBlockContainer"],.block-container{
+        max-width:1680px !important;padding-left:1.2rem !important;padding-right:1.2rem !important;}</style>""",
+                unsafe_allow_html=True)
+    col_a, col_d = st.columns([1.05, 3.5], gap="small")
+    with col_d:
+        if _render_dashboard_zona:
+            _render_dashboard_zona(data, height=1010)
+    with col_a:
+        if DASHBOARD_OK:
+            _render_panel_agente(claude, data, tier_key, idioma)
+
+    # ── Validar una zona con el análisis completo ──
+    if zonas:
+        st.markdown("#### ✅ Validar una zona con el análisis completo")
+        st.caption("Corre el análisis de ubicación (score, tráfico, mercado, forecast y recomendación) en el centro de la zona.")
+        cols = st.columns(min(len(zonas), 6))
+        for i, z in enumerate(zonas[:6]):
+            cols[i].button(f"#{i+1} · {z['score']} pts\n{z['nombre'][:28]}", key=f"val_zona_{i}",
+                           use_container_width=True, on_click=_validar_zona_cb, args=(z, zr["tipo"], tier_key))
+
+    # ── Descargas ──
+    st.markdown("#### 📥 Descargar")
+    d1, d2 = st.columns(2)
+    with d1:
+        try:
+            st.download_button("🗺️ Dashboard de zonas (.html)", data=_html_zona(data).encode("utf-8"),
+                               file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.html",
+                               mime="text/html", use_container_width=True, key="dl_zona_html")
+        except Exception as e:
+            st.caption(f"HTML no disponible: {e}")
+    with d2:
+        try:
+            filas = [{
+                "ranking_pos": z["rank"], "zona_categoria": z["categoria"], "direccion": z["nombre"],
+                "score": z["score"], "nse": z.get("nse", "—"), "densidad": int(z.get("densidad") or 0),
+                "n_competidores": z["n_comp"], "vialidad": (z.get("vial") or {}).get("badge", ""),
+                "mejor_competidor": (z.get("mejor") or {}).get("nombre", ""),
+                "mejor_rating": (z.get("mejor") or {}).get("rating", 0),
+                "mejor_reviews": (z.get("mejor") or {}).get("reviews", 0),
+                "recom_ubicacion": z.get("recom", {}),
+            } for z in zonas]
+            pptx_z = generar_pptx_zona_potencial(filas, zr["ref"], zr["radio_km"], tipo_nom, tier_key=tier_key)
+            if pptx_z:
+                st.download_button("⬇️ Reporte de zonas (PowerPoint)", data=pptx_z,
+                                   file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.pptx",
+                                   mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                   use_container_width=True, type="primary", key="dl_zona_pptx")
+        except Exception as e:
+            st.caption(f"PowerPoint no disponible: {e}")
+
+
 # ============================================
 # INTERFAZ STREAMLIT
 # ============================================
@@ -5729,6 +6638,44 @@ if tier_key != "free":
     {'&nbsp;·&nbsp; ✅ Desglose score' if tier_info['muestra_score_desglose'] else ''}
 </div>
 """, unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ── MODO DE ANÁLISIS (según plan) ─────────────────────────────
+# Free: validar · Básico: + descubrir negocio · PRO/Premium: + zona potencial
+_MODOS_TIER = {
+    "free":     ["validar"],
+    "basic":    ["validar", "recomendar"],
+    "pro":      ["validar", "recomendar", "zona_potencial"],
+    "premium":  ["validar", "recomendar", "zona_potencial"],
+    "premium2": ["validar", "recomendar", "zona_potencial"],
+}
+_MODO_LABEL = {
+    "validar":        ("✅ Validar mi idea", "¿Funciona MI giro en esta ubicación?"),
+    "recomendar":     ("🎯 Descubrir negocio", "¿Qué giro conviene más en esta ubicación?"),
+    "zona_potencial": ("🗺️ Descubrir zona", "¿Dónde conviene abrir mi giro?"),
+}
+st.markdown(f"### {t['modo_analisis']}")
+_modos = _MODOS_TIER.get(tier_key, ["validar"])
+modo = st.radio("Modo de análisis", options=_modos, horizontal=True, key=f"modo_sel_{tier_key}",
+                format_func=lambda x: _MODO_LABEL[x][0],
+                captions=[_MODO_LABEL[x][1] for x in _modos], label_visibility="collapsed")
+_bloq = [m for m in ["recomendar", "zona_potencial"] if m not in _modos]
+if _bloq:
+    st.caption("🔒 " + " · ".join(
+        f"**{_MODO_LABEL[m][0]}** desde plan {'Básico ($99)' if m == 'recomendar' else 'PRO ($499)'}" for m in _bloq))
+
+if modo == "zona_potencial":
+    st.markdown("---")
+    render_modo_zona(tier_key, idioma)
+    st.stop()
+
+tipo_negocio_seleccionado = None
+if modo == "validar":
+    st.markdown(f"**{t['selecciona_tipo']}**")
+    tipo_negocio_seleccionado = st.selectbox("Giro a validar", options=list(TIPOS_NEGOCIO.keys()), key="tipo_validar",
+                                              format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"],
+                                              label_visibility="collapsed")
 
 st.markdown("---")
 
@@ -5912,6 +6859,28 @@ elif tipo_plaza == "strip_center":
 # Guardar tipo_plaza en session_state para usarlo en el análisis
 st.session_state["tipo_plaza"] = tipo_plaza
 
+# ── RADIO DE ANÁLISIS ─────────────────────────────────────────────
+_radio_default = radio_efectivo_analisis(None, tipo_plaza)
+_radio_opciones = {"free": [500], "basic": [300, 500, 600, 800, 1000]}.get(
+    tier_key, [300, 500, 600, 800, 1000, 1500, 2000])
+st.markdown("**📏 Radio de análisis de competencia**")
+if len(_radio_opciones) == 1:
+    st.session_state["radio_analisis"] = None
+    st.caption(f"Radio fijo de {_radio_default} m · 🔒 Elegir radio (300–1,000 m) disponible desde plan Básico")
+else:
+    if _radio_default not in _radio_opciones:
+        _radio_default = 500
+    st.session_state["radio_analisis"] = st.select_slider(
+        "Radio de análisis", options=_radio_opciones, value=_radio_default,
+        format_func=lambda x: f"{x:,} m", key=f"radio_slider_{tier_key}", label_visibility="collapsed")
+    _r_sel = st.session_state["radio_analisis"]
+    _tip_radio = ("zona de influencia peatonal inmediata" if _r_sel <= 400 else
+                  "radio estándar de tienda de barrio / paso" if _r_sel <= 600 else
+                  "radio de negocio mixto o de destino" if _r_sel <= 1000 else
+                  "radio de destino (el cliente llega en auto)")
+    st.caption(f"{_r_sel:,} m — {_tip_radio}. El score se normaliza por área, así que un radio mayor no te castiga solo por abarcar más. "
+               "Google devuelve máximo 20 competidores por búsqueda (los más cercanos).")
+
 # ── FLUJO DE ACCESO Y ESTACIONAMIENTO ────────────────────────────────────────
 st.markdown("**¿Cómo llegan principalmente los clientes a esta zona?**")
 _col_flujo1, _col_flujo2 = st.columns([3, 2])
@@ -5972,94 +6941,15 @@ except ImportError:
 
 st.markdown("---")
 
-# Modo de análisis — "Descubrir negocio" solo desde Basic+
-st.markdown(f"### {t['modo_analisis']}")
-if tier_key == "free":
-    modo = "validar"
-    st.radio("", options=["validar"],
-             format_func=lambda x: t["modo_validar"],
-             horizontal=True)
-    st.caption("🔒 Modo **Descubrir qué negocio es mejor** disponible desde plan Básico ($99 MXN)")
-else:
-    if tier_key == "premium2":
-        # ZONA ELITE: validar + descubrir + identificar zona potencial
-        modo = st.radio("", options=["validar", "recomendar", "zona_potencial"],
-                        format_func=lambda x: {
-                            "validar":        t["modo_validar"],
-                            "recomendar":     t["modo_recomendar"],
-                            "zona_potencial": "🔍 Identificar zona potencial",
-                        }.get(x, x),
-                        horizontal=True,
-                        key="modo_elite")
-        if modo == "zona_potencial":
-            # En zona_potencial se ocultan validar/descubrir — banner informativo
-            st.markdown("""<div style='background:#FFFFFF; border:1px solid #E3E8EF; border-radius:10px;
-                padding:12px 18px; margin:6px 0;'>
-                <span style='color:#2A6FDB; font-weight:700;'>🔍 Identificar Zona Potencial</span><br>
-                <span style='color:#5C6B7A; font-size:12px;'>
-                Ingresa un punto de referencia y encontraremos las mejores zonas
-                para tu negocio en el radio que elijas.</span>
-                </div>""", unsafe_allow_html=True)
-    elif tier_key == "premium":
-        # PREMIUM: validar + descubrir + descubrir zona (nueva función)
-        modo = st.radio("", options=["validar", "recomendar", "zona_potencial"],
-                        format_func=lambda x: {
-                            "validar":        t["modo_validar"],
-                            "recomendar":     t["modo_recomendar"],
-                            "zona_potencial": "🔍 Descubrir zona potencial",
-                        }.get(x, x),
-                        horizontal=True,
-                        key="modo_premium")
-        if modo == "zona_potencial":
-            st.markdown("""<div style='background:#FFFFFF; border:1px solid #E3E8EF; border-radius:10px;
-                padding:12px 18px; margin:6px 0;'>
-                <span style='color:#2A6FDB; font-weight:700;'>🔍 Descubrir Zona Potencial — PREMIUM 💎</span><br>
-                <span style='color:#5C6B7A; font-size:12px;'>
-                Ingresa un punto de referencia y encontraremos las mejores zonas
-                para tu negocio en el radio que elijas.</span>
-                </div>""", unsafe_allow_html=True)
-    elif tier_key == "pro":
-        modo = st.radio("", options=["validar", "recomendar"],
-                        format_func=lambda x: t["modo_validar"] if x == "validar" else t["modo_recomendar"],
-                        horizontal=True)
-    else:
-        modo = st.radio("", options=["validar", "recomendar"],
-                        format_func=lambda x: t["modo_validar"] if x == "validar" else t["modo_recomendar"],
-                        horizontal=True)
-
-tipo_negocio_seleccionado = None
-if modo == "zona_potencial":
-    # ── ZONA POTENCIAL TEMPORALMENTE BLOQUEADA ──
-    st.markdown("---")
-    st.markdown("""
-    <div style='background:#F5F7FA; border:2px solid #2A6FDB; border-radius:12px;
-         padding:28px 32px; margin:12px 0; text-align:center;'>
-        <div style='font-size:32px; margin-bottom:10px;'>🔧</div>
-        <div style='color:#2A6FDB; font-weight:700; font-size:18px; margin-bottom:8px;'>
-            Zona Potencial — En mantenimiento</div>
-        <div style='color:#5C6B7A; font-size:13px; line-height:1.6; margin-bottom:16px;'>
-            Estamos mejorando la detección de zonas y el reporte PowerPoint.<br>
-            Esta función estará disponible muy pronto con mayor precisión y estabilidad.
-        </div>
-        <div style='color:#888; font-size:11px;'>
-            Mientras tanto usa los modos <b style="color:#2A6FDB">Validar negocio</b> o
-            <b style="color:#2A6FDB">Descubrir negocio</b> para analizar ubicaciones específicas.
-        </div>
-    </div>""", unsafe_allow_html=True)
-    st.stop()
-
-if modo == "validar":
-    st.markdown(f"**{t['selecciona_tipo']}**")
-    tipo_negocio_seleccionado = st.selectbox("", options=list(TIPOS_NEGOCIO.keys()),
-                                              format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"])
-
-st.markdown("---")
-
 # ── BOTÓN ANALIZAR ──────────────────────────
-if st.button(t["boton_analizar"], type="primary", use_container_width=True):
+_auto = st.session_state.pop("_auto_analizar", False)
+if st.button(t["boton_analizar"], type="primary", use_container_width=True) or _auto:
 
-    # Prioridad: click en mapa > texto
-    if 'lat_mapa' in dir() and lat_mapa and lng_mapa:
+    # Prioridad: zona elegida en "Descubrir zona" > click en mapa > texto
+    _forz = st.session_state.pop("_coords_forzadas", None)
+    if _forz:
+        lat, lng, ubicacion = _forz
+    elif 'lat_mapa' in dir() and lat_mapa and lng_mapa:
         lat, lng  = lat_mapa, lng_mapa
         ubicacion = direccion_mapa or f"{lat:.6f}, {lng:.6f}"
     elif direccion_texto:
@@ -6082,11 +6972,13 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
     # Nuevos inputs de acceso vehicular
     _tipo_flujo           = st.session_state.get("tipo_flujo", "peatonal")
     _tiene_estacionamiento = st.session_state.get("tiene_estacionamiento", False)
+    _radio_sel  = st.session_state.get("radio_analisis") or None
+    _radio_eff  = radio_efectivo_analisis(_radio_sel, _tipo_plaza)
 
     with st.spinner("🔍 Analizando ubicación..."):
 
         # Obtener demografía primero (no depende del tipo de negocio)
-        demografia = obtener_demografia(lat, lng, ubicacion)
+        demografia = obtener_demografia(lat, lng, ubicacion, radio_m=_radio_eff)
 
         # Para mall: usar NSE del mall si es conocido (override)
         if _tipo_plaza == "mall":
@@ -6099,7 +6991,7 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
         if modo == "validar":
             competidores = buscar_competencia_por_tipo(
                 lat, lng, tipo_negocio_seleccionado,
-                tipo_plaza=_tipo_plaza
+                radio=_radio_sel, tipo_plaza=_tipo_plaza
             )
             # Detectar contexto con tipo de negocio para motor vial preciso
             contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_seleccionado)
@@ -6117,7 +7009,8 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
                     contexto["tipo_zona"] = "comercial"
                     contexto["badges"].append("🏪 Strip Center")
 
-            score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado)
+            contexto["radio_m"] = _radio_eff
+            score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado, _radio_eff)
             score_ctx  = ajustar_score_por_contexto(score_base, tipo_negocio_seleccionado, contexto)
             score_dem  = ajustar_score_por_demografia(score_ctx, tipo_negocio_seleccionado, demografia)
 
@@ -6147,11 +7040,12 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
                                                   tipo_plaza=_tipo_plaza,
                                                   info_plaza=info_plaza if _tipo_plaza else None,
                                                   tipo_flujo=_tipo_flujo,
-                                                  tiene_estacionamiento=_tiene_estacionamiento)
+                                                  tiene_estacionamiento=_tiene_estacionamiento,
+                                                  radio_m=_radio_eff)
             recomendaciones = None
             tipo_negocio_top1 = tipo_negocio_seleccionado
         else:
-            recomendaciones, contexto, demografia = recomendar_tipos_negocio(lat, lng, ubicacion)
+            recomendaciones, contexto, demografia = recomendar_tipos_negocio(lat, lng, ubicacion, radio=_radio_sel, tipo_plaza=_tipo_plaza)
             # Aplicar ajuste vehicular a CADA recomendación
             for rec in (recomendaciones or []):
                 rec["score"], rec["nota_vehicular"] = ajustar_score_por_acceso_vehicular(
@@ -6161,7 +7055,7 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
                 rec["score"] = max(0, min(100, rec["score"]))
             # Reordenar después del ajuste vehicular (puede cambiar el ranking)
             if recomendaciones:
-                recomendaciones.sort(key=lambda x: x["score"], reverse=True)
+                recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
             competidores = recomendaciones[0]["competidores"] if recomendaciones else []
             score        = recomendaciones[0]["score"] if recomendaciones else 0
             desglose     = recomendaciones[0]["desglose"] if recomendaciones else {}
@@ -6178,7 +7072,7 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
                             _tipo_plaza, _zona_mall, _renta_mall, "sin_ancla"
                         )
                         rec["score"] = max(0, min(100, rec["score"]))
-                    recomendaciones.sort(key=lambda x: x["score"], reverse=True)
+                    recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
                 elif _tipo_plaza == "strip_center":
                     contexto["tipo_zona"] = "comercial"
                     contexto["badges"].append("🏪 Strip Center")
@@ -6192,6 +7086,7 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
             contexto["tiene_estacionamiento"] = _tiene_estacionamiento
             nota_veh_top1 = recomendaciones[0].get("nota_vehicular", "") if recomendaciones else ""
             contexto["nota_vehicular"] = nota_veh_top1
+            contexto["radio_m"] = _radio_eff
             if nota_veh_top1 and _tipo_flujo != "peatonal":
                 contexto["badges"].append("🚗 Tráfico vehicular" if _tipo_flujo == "vehicular" else "🚶🚗 Tráfico mixto")
             analisis = generar_analisis_claude(ubicacion, [], idioma, "recomendar",
@@ -6207,7 +7102,7 @@ if st.button(t["boton_analizar"], type="primary", use_container_width=True):
         "competidores": competidores, "contexto": contexto,
         "demografia": demografia, "recomendaciones": recomendaciones,
         "modo": modo, "tipo_negocio": tipo_negocio_seleccionado,
-        "tipo_negocio_top1": tipo_negocio_top1, "idioma": idioma,
+        "tipo_negocio_top1": tipo_negocio_top1, "idioma": idioma, "radio_m": _radio_eff,
     }
     # META CAPI — ViewContent
     _meta_capi("ViewContent", content_name=f"{ubicacion[:50]} | score:{score:.0f}")
@@ -6243,17 +7138,36 @@ if "resultados" in st.session_state:
         tipo_negocio_top1 if 'tipo_negocio_top1' in dir() and tipo_negocio_top1 else
         (recomendaciones[0].get("tipo_key") if recomendaciones else None))
 
-    st.markdown(f"## {t['titulo_analisis']}")
-    if modo == "validar":
-        st.markdown(f"### {TIPOS_NEGOCIO[tipo_negocio_seleccionado]['nombre']}")
+    # ══════════════════════════════════════════
+    # DASHBOARD TIPO AGENTE (vista principal)
+    # ══════════════════════════════════════════
+    if DASHBOARD_OK:
+        st.markdown("""<style>
+        .main .block-container, [data-testid="stMainBlockContainer"], .block-container {
+            max-width: 1680px !important; padding-left: 1.2rem !important; padding-right: 1.2rem !important; }
+        </style>""", unsafe_allow_html=True)
+        _dash_data = preparar_datos_dashboard(_r, tier_key)
+        _col_agente, _col_dash = st.columns([1.05, 3.5], gap="small")
+        with _col_dash:
+            _render_dashboard(_datos_para_navegador(_dash_data), height=1010)
+        with _col_agente:
+            _render_panel_agente(claude, _dash_data, tier_key, idioma)
+    else:
+        st.warning(f"Dashboard no disponible: {_DASH_ERROR}")
 
-    # ── ANÁLISIS VIAL — visible en todos los tiers ──
-    av_data = contexto.get("analisis_vial")
-    if av_data and av_data.get("descripcion"):
-        dep_label = {"alto": "negocio de paso", "medio": "negocio mixto", "bajo": "negocio de destino"}.get(
-            av_data.get("dependencia_paso","medio"), "negocio")
-        color_vial = "#1F9D57" if av_data["ajuste_score"] > 0 else "#E0524A" if av_data["ajuste_score"] < -5 else "#D98A1F"
-        st.markdown(f"""
+    _ver_detalle = st.toggle("📑 Ver análisis detallado (vista clásica)", value=not DASHBOARD_OK, key="toggle_vista_clasica")
+    if _ver_detalle:
+        st.markdown(f"## {t['titulo_analisis']}")
+        if modo == "validar":
+            st.markdown(f"### {TIPOS_NEGOCIO[tipo_negocio_seleccionado]['nombre']}")
+
+        # ── ANÁLISIS VIAL — visible en todos los tiers ──
+        av_data = contexto.get("analisis_vial")
+        if av_data and av_data.get("descripcion"):
+            dep_label = {"alto": "negocio de paso", "medio": "negocio mixto", "bajo": "negocio de destino"}.get(
+                av_data.get("dependencia_paso","medio"), "negocio")
+            color_vial = "#1F9D57" if av_data["ajuste_score"] > 0 else "#E0524A" if av_data["ajuste_score"] < -5 else "#D98A1F"
+            st.markdown(f"""
         <div style='background:{color_vial}11; border-left:4px solid {color_vial};
              padding:10px 14px; border-radius:0 8px 8px 0; margin:8px 0;'>
             <b style='color:{color_vial};'>{av_data["badge"]}</b>
@@ -6264,53 +7178,53 @@ if "resultados" in st.session_state:
             <span style='font-size:12px; color:#444;'>{av_data["descripcion"]}</span>
         </div>""", unsafe_allow_html=True)
 
-    # ── NOTA DE ACCESO VEHICULAR — visible en todos los tiers ──
-    _nota_veh = contexto.get("nota_vehicular", "") if contexto else ""
-    _tipo_flujo_ctx = contexto.get("tipo_flujo", "peatonal") if contexto else "peatonal"
-    _estac_ctx = contexto.get("tiene_estacionamiento", False) if contexto else False
-    if _nota_veh and _tipo_flujo_ctx != "peatonal":
-        _color_veh = "#1F9D57" if _estac_ctx else "#D98A1F"
-        _icono_veh = "🚗" if _tipo_flujo_ctx == "vehicular" else "🚶🚗"
-        st.markdown(f"""
+        # ── NOTA DE ACCESO VEHICULAR — visible en todos los tiers ──
+        _nota_veh = contexto.get("nota_vehicular", "") if contexto else ""
+        _tipo_flujo_ctx = contexto.get("tipo_flujo", "peatonal") if contexto else "peatonal"
+        _estac_ctx = contexto.get("tiene_estacionamiento", False) if contexto else False
+        if _nota_veh and _tipo_flujo_ctx != "peatonal":
+            _color_veh = "#1F9D57" if _estac_ctx else "#D98A1F"
+            _icono_veh = "🚗" if _tipo_flujo_ctx == "vehicular" else "🚶🚗"
+            st.markdown(f"""
         <div style='background:{_color_veh}11; border-left:4px solid {_color_veh};
              padding:10px 14px; border-radius:0 8px 8px 0; margin:8px 0;'>
             <b style='color:{_color_veh};'>{_icono_veh} Acceso vehicular</b><br>
             <span style='font-size:12px; color:#444;'>{_nota_veh}</span>
         </div>""", unsafe_allow_html=True)
 
-    # Características de la zona (Basic+)
-    if tier_info["muestra_badges"] and contexto.get("badges"):
-        st.markdown("**📍 Características de la zona:**")
-        BADGE_DESC = {
-            "🚗 Alto tráfico vehicular": "La ubicación está sobre una vialidad de alto flujo — ideal para negocios de paso",
-            "⛽ Gasolinera cercana":      "Presencia de gasolinera en 500m — atrae tráfico vehicular constante",
-            "🏬 Plaza comercial":         "Plaza o centro comercial cercano — genera tráfico de shoppers",
-            "🏥 Hospital cercano":        "Hospital o clínica en 500m — clientela cautiva y tráfico constante",
-            "🎓 Escuela/Universidad":     "Institución educativa en 500m — alto flujo estudiantil",
-            "🚌 Transporte público":      "Estación de transporte cercana — alta accesibilidad peatonal",
-        }
-        chips_html = "<div style='display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;'>"
-        # Filtrar badges de vialidad — ya se muestran en el bloque de análisis vial
-        badges_vial = {"🛣️", "🚦", "🏘️", "📍"}
-        badges_filtrados = [b for b in contexto["badges"]
-                           if not any(b.startswith(v) for v in badges_vial)]
-        for badge in badges_filtrados:
-            desc = BADGE_DESC.get(badge, "Característica detectada en la zona")
-            chips_html += f"""
+        # Características de la zona (Basic+)
+        if tier_info["muestra_badges"] and contexto.get("badges"):
+            st.markdown("**📍 Características de la zona:**")
+            BADGE_DESC = {
+                "🚗 Alto tráfico vehicular": "La ubicación está sobre una vialidad de alto flujo — ideal para negocios de paso",
+                "⛽ Gasolinera cercana":      "Presencia de gasolinera en 500m — atrae tráfico vehicular constante",
+                "🏬 Plaza comercial":         "Plaza o centro comercial cercano — genera tráfico de shoppers",
+                "🏥 Hospital cercano":        "Hospital o clínica en 500m — clientela cautiva y tráfico constante",
+                "🎓 Escuela/Universidad":     "Institución educativa en 500m — alto flujo estudiantil",
+                "🚌 Transporte público":      "Estación de transporte cercana — alta accesibilidad peatonal",
+            }
+            chips_html = "<div style='display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;'>"
+            # Filtrar badges de vialidad — ya se muestran en el bloque de análisis vial
+            badges_vial = {"🛣️", "🚦", "🏘️", "📍"}
+            badges_filtrados = [b for b in contexto["badges"]
+                               if not any(b.startswith(v) for v in badges_vial)]
+            for badge in badges_filtrados:
+                desc = BADGE_DESC.get(badge, "Característica detectada en la zona")
+                chips_html += f"""
             <div title='{desc}' style='
                 background:#E3F2FD; border:1px solid #1976D2; border-radius:20px;
                 padding:6px 14px; font-size:13px; color:#1565C0; cursor:help;
                 font-weight:500;'>{badge}</div>"""
-        chips_html += "</div>"
-        chips_html += "<p style='font-size:11px; color:#888; margin:0;'>💡 Pasa el cursor sobre cada chip para ver su significado</p>"
-        st.markdown(chips_html, unsafe_allow_html=True)
-        st.markdown("") 
+            chips_html += "</div>"
+            chips_html += "<p style='font-size:11px; color:#888; margin:0;'>💡 Pasa el cursor sobre cada chip para ver su significado</p>"
+            st.markdown(chips_html, unsafe_allow_html=True)
+            st.markdown("") 
 
-    # Score visual
-    nivel, color = nivel_score(score, idioma)
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown(f"""
+        # Score visual
+        nivel, color = nivel_score(score, idioma)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown(f"""
         <div style='text-align:center; padding:25px; background:linear-gradient(135deg,{color}22 0%,{color}44 100%);
              border-radius:15px; border:3px solid {color};'>
             <h1 style='color:{color}; font-size:72px; margin:0;'>{score}</h1>
@@ -6318,17 +7232,17 @@ if "resultados" in st.session_state:
             <b style='color:{color}; font-size:18px;'>{nivel}</b>
         </div>""", unsafe_allow_html=True)
 
-    # Desglose score (Basic+)
-    if tier_info["muestra_score_desglose"] and desglose:
+        # Desglose score (Basic+)
+        if tier_info["muestra_score_desglose"] and desglose:
 
-        # ── Banner de plaza si aplica ──
-        _ip = contexto.get("info_plaza", {}) if contexto else {}
-        if _ip and _ip.get("tipo_plaza"):
-            _pl_label = "🏬 Mall / Plaza Cerrada" if _ip["tipo_plaza"] == "mall" else "🏪 Strip Center / Plaza Abierta"
-            _pl_color = "#2A6FDB" if _ip["tipo_plaza"] == "mall" else "#2A6FDB"
-            _pl_notas = _ip.get("nota", "").replace("\n", "<br>")
-            _pl_roi   = _ip.get("ajuste_roi_pct", 0)
-            st.markdown(f"""
+            # ── Banner de plaza si aplica ──
+            _ip = contexto.get("info_plaza", {}) if contexto else {}
+            if _ip and _ip.get("tipo_plaza"):
+                _pl_label = "🏬 Mall / Plaza Cerrada" if _ip["tipo_plaza"] == "mall" else "🏪 Strip Center / Plaza Abierta"
+                _pl_color = "#2A6FDB" if _ip["tipo_plaza"] == "mall" else "#2A6FDB"
+                _pl_notas = _ip.get("nota", "").replace("\n", "<br>")
+                _pl_roi   = _ip.get("ajuste_roi_pct", 0)
+                st.markdown(f"""
             <div style='background:#F5F7FA; border-left:4px solid {_pl_color};
                  border-radius:8px; padding:12px 16px; margin:10px 0;'>
                 <div style='color:{_pl_color}; font-weight:700; font-size:13px; margin-bottom:6px;'>
@@ -6337,67 +7251,67 @@ if "resultados" in st.session_state:
                 {"<div style='color:#D98A1F; font-size:11px; margin-top:6px;'>⚠️ El ROI estimado ya incluye una reducción de ~" + str(_pl_roi) + "% por renta de plaza.</div>" if _pl_roi > 0 else ""}
             </div>""", unsafe_allow_html=True)
 
-        st.markdown(f"#### {t['desglose_score']}")
+            st.markdown(f"#### {t['desglose_score']}")
 
-        # Definir interpretaciones dinámicas
-        def _interp_factor(valor, tipo):
-            if tipo == "densidad":
-                if valor >= 80: return "✅ Poca competencia — mercado libre"
-                elif valor >= 60: return "🟡 Competencia moderada"
-                elif valor >= 40: return "🟠 Zona saturada"
-                else: return "🔴 Alta saturación"
-            elif tipo == "calidad":
-                if valor >= 80: return "✅ Competidores débiles — oportunidad"
-                elif valor >= 60: return "🟡 Calidad media en la zona"
-                elif valor >= 40: return "🟠 Competidores bien calificados"
-                else: return "🔴 Competencia muy fuerte"
-            elif tipo == "consolidacion":
-                if valor >= 80: return "✅ Mercado joven — fácil de ganar"
-                elif valor >= 60: return "🟡 Mercado en desarrollo"
-                elif valor >= 40: return "🟠 Mercado establecido"
-                else: return "🔴 Mercado muy consolidado"
+            # Definir interpretaciones dinámicas
+            def _interp_factor(valor, tipo):
+                if tipo == "densidad":
+                    if valor >= 80: return "✅ Poca competencia — mercado libre"
+                    elif valor >= 60: return "🟡 Competencia moderada"
+                    elif valor >= 40: return "🟠 Zona saturada"
+                    else: return "🔴 Alta saturación"
+                elif tipo == "calidad":
+                    if valor >= 80: return "✅ Competidores débiles — oportunidad"
+                    elif valor >= 60: return "🟡 Calidad media en la zona"
+                    elif valor >= 40: return "🟠 Competidores bien calificados"
+                    else: return "🔴 Competencia muy fuerte"
+                elif tipo == "consolidacion":
+                    if valor >= 80: return "✅ Mercado joven — fácil de ganar"
+                    elif valor >= 60: return "🟡 Mercado en desarrollo"
+                    elif valor >= 40: return "🟠 Mercado establecido"
+                    else: return "🔴 Mercado muy consolidado"
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric(
-                "Densidad de competencia (50%)",
-                f"{desglose['densidad']}/100",
-                help="Cuántos negocios similares hay en 500m. Mayor puntaje = menos competidores = más oportunidad."
-            )
-            st.caption(_interp_factor(desglose['densidad'], 'densidad'))
-        with c2:
-            st.metric(
-                "Calidad de competencia (30%)",
-                f"{desglose['calidad']}/100",
-                help="Rating promedio de los competidores. Mayor puntaje = competidores con rating bajo = mercado insatisfecho."
-            )
-            st.caption(_interp_factor(desglose['calidad'], 'calidad'))
-        with c3:
-            st.metric(
-                "Consolidación del mercado (20%)",
-                f"{desglose['consolidacion']}/100",
-                help="Volumen de reseñas de los competidores. Mayor puntaje = mercado joven con pocos reviews = más fácil de entrar."
-            )
-            st.caption(_interp_factor(desglose['consolidacion'], 'consolidacion'))
-    elif not tier_info["muestra_score_desglose"]:
-        # ── FREE: liberar competencia real como gancho (dato ya calculado) ──
-        _n_comp   = desglose.get("num_competidores", 0) if desglose else 0
-        _rating   = desglose.get("rating_promedio", 0) if desglose else 0
-        _dens     = desglose.get("densidad", 0) if desglose else 0
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric(
+                    "Densidad de competencia (50%)",
+                    f"{desglose['densidad']}/100",
+                    help="Cuántos negocios similares hay en 500m. Mayor puntaje = menos competidores = más oportunidad."
+                )
+                st.caption(_interp_factor(desglose['densidad'], 'densidad'))
+            with c2:
+                st.metric(
+                    "Calidad de competencia (30%)",
+                    f"{desglose['calidad']}/100",
+                    help="Rating promedio de los competidores. Mayor puntaje = competidores con rating bajo = mercado insatisfecho."
+                )
+                st.caption(_interp_factor(desglose['calidad'], 'calidad'))
+            with c3:
+                st.metric(
+                    "Consolidación del mercado (20%)",
+                    f"{desglose['consolidacion']}/100",
+                    help="Volumen de reseñas de los competidores. Mayor puntaje = mercado joven con pocos reviews = más fácil de entrar."
+                )
+                st.caption(_interp_factor(desglose['consolidacion'], 'consolidacion'))
+        elif not tier_info["muestra_score_desglose"]:
+            # ── FREE: liberar competencia real como gancho (dato ya calculado) ──
+            _n_comp   = desglose.get("num_competidores", 0) if desglose else 0
+            _rating   = desglose.get("rating_promedio", 0) if desglose else 0
+            _dens     = desglose.get("densidad", 0) if desglose else 0
 
-        # Etiqueta de saturación derivada del score de densidad ya calculado
-        if _dens >= 80:
-            _sat_txt, _sat_col = "Baja", "#1F9D55"
-        elif _dens >= 60:
-            _sat_txt, _sat_col = "Media", "#D98A1F"
-        elif _dens >= 40:
-            _sat_txt, _sat_col = "Media-alta", "#E8730C"
-        else:
-            _sat_txt, _sat_col = "Alta", "#D64545"
+            # Etiqueta de saturación derivada del score de densidad ya calculado
+            if _dens >= 80:
+                _sat_txt, _sat_col = "Baja", "#1F9D55"
+            elif _dens >= 60:
+                _sat_txt, _sat_col = "Media", "#D98A1F"
+            elif _dens >= 40:
+                _sat_txt, _sat_col = "Media-alta", "#E8730C"
+            else:
+                _sat_txt, _sat_col = "Alta", "#D64545"
 
-        _rating_txt = f"{_rating:.1f}★ promedio" if _rating else "sin rating relevante"
+            _rating_txt = f"{_rating:.1f}★ promedio" if _rating else "sin rating relevante"
 
-        st.markdown(f"""
+            st.markdown(f"""
 <div style='background:#0F1E33 !important; border:1px solid #24405F; border-radius:12px;
      padding:18px 20px; margin:10px 0;'>
     <div style='display:flex; align-items:baseline; gap:10px; margin-bottom:10px;'>
@@ -6414,378 +7328,378 @@ if "resultados" in st.session_state:
     </div>
 </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
+        st.markdown("---")
 
-    if modo == "validar" and tier_key != "free":
-        _key_comp = "exp_comp_open"
-        if _key_comp not in st.session_state: st.session_state[_key_comp] = False
-        if st.button("Ver analisis de competencia" + (" ▲" if st.session_state[_key_comp] else " ▼"), key="btn_comp_exp", use_container_width=True):
-            st.session_state[_key_comp] = not st.session_state[_key_comp]
-        if st.session_state[_key_comp]:
-            st.markdown(analisis)
+        if modo == "validar" and tier_key != "free":
+            _key_comp = "exp_comp_open"
+            if _key_comp not in st.session_state: st.session_state[_key_comp] = False
+            if st.button("Ver analisis de competencia" + (" ▲" if st.session_state[_key_comp] else " ▼"), key="btn_comp_exp", use_container_width=True):
+                st.session_state[_key_comp] = not st.session_state[_key_comp]
+            if st.session_state[_key_comp]:
+                st.markdown(analisis)
 
-        if tier_key in ("premium", "premium2") and competidores:
-            _key_dif = "exp_dif_open"
-            if _key_dif not in st.session_state: st.session_state[_key_dif] = False
-            if st.button("Ver cómo diferenciarte de la competencia" + (" ▲" if st.session_state[_key_dif] else " ▼"), key="btn_dif_exp", use_container_width=True):
-                st.session_state[_key_dif] = not st.session_state[_key_dif]
-            if st.session_state[_key_dif]:
-                if "_diferenciacion_txt" not in st.session_state:
-                    with st.spinner("Analizando reseñas de la competencia..."):
-                        _comp_reviews = obtener_reviews_competidores(competidores)
-                        _nombre_tipo  = TIPOS_NEGOCIO.get(tipo_negocio_seleccionado, {}).get('nombre', 'negocio')
-                        st.session_state["_diferenciacion_txt"] = generar_analisis_diferenciacion(
-                            _nombre_tipo, _comp_reviews, idioma
-                        )
-                _dif_txt = st.session_state["_diferenciacion_txt"]
-                if _dif_txt:
-                    st.markdown(_dif_txt)
-                else:
-                    st.caption("No hay suficientes reseñas de texto en la competencia cercana para este análisis.")
-    elif modo != "validar":
-        # Recomendador — mostrar top N según tier
-        top_n = tier_info["top_negocios"]
-        st.markdown(f"#### {t['top_recomendaciones']}")
-        for i, rec in enumerate(recomendaciones[:top_n]):
-            nivel_r, color_r = nivel_score(rec['score'], idioma)
-            _exp_label = re.sub(r'[^\x00-\x7F]','',rec['nombre']).strip()
-            _key_rec = f"exp_rec_{i}"
-            if _key_rec not in st.session_state:
-                st.session_state[_key_rec] = (i == 0)
-            _arrow = " ▲" if st.session_state[_key_rec] else " ▼"
-            _clic = st.button(f"#{i+1} {_exp_label} - Score: {rec['score']}/100" + _arrow,
-                              key=f"btn_rec_{i}", use_container_width=True)
-            if _clic:
-                st.session_state[_key_rec] = not st.session_state[_key_rec]
-            if st.session_state[_key_rec]:
-                c1, c2 = st.columns([2, 1])
-                with c1:
-                    st.markdown(f"""
+            if tier_key in ("premium", "premium2") and competidores:
+                _key_dif = "exp_dif_open"
+                if _key_dif not in st.session_state: st.session_state[_key_dif] = False
+                if st.button("Ver cómo diferenciarte de la competencia" + (" ▲" if st.session_state[_key_dif] else " ▼"), key="btn_dif_exp", use_container_width=True):
+                    st.session_state[_key_dif] = not st.session_state[_key_dif]
+                if st.session_state[_key_dif]:
+                    if "_diferenciacion_txt" not in st.session_state:
+                        with st.spinner("Analizando reseñas de la competencia..."):
+                            _comp_reviews = obtener_reviews_competidores(competidores)
+                            _nombre_tipo  = TIPOS_NEGOCIO.get(tipo_negocio_seleccionado, {}).get('nombre', 'negocio')
+                            st.session_state["_diferenciacion_txt"] = generar_analisis_diferenciacion(
+                                _nombre_tipo, _comp_reviews, idioma
+                            )
+                    _dif_txt = st.session_state["_diferenciacion_txt"]
+                    if _dif_txt:
+                        st.markdown(_dif_txt)
+                    else:
+                        st.caption("No hay suficientes reseñas de texto en la competencia cercana para este análisis.")
+        elif modo != "validar":
+            # Recomendador — mostrar top N según tier
+            top_n = tier_info["top_negocios"]
+            st.markdown(f"#### {t['top_recomendaciones']}")
+            for i, rec in enumerate(recomendaciones[:top_n]):
+                nivel_r, color_r = nivel_score(rec['score'], idioma)
+                _exp_label = re.sub(r'[^\x00-\x7F]','',rec['nombre']).strip()
+                _key_rec = f"exp_rec_{i}"
+                if _key_rec not in st.session_state:
+                    st.session_state[_key_rec] = (i == 0)
+                _arrow = " ▲" if st.session_state[_key_rec] else " ▼"
+                _clic = st.button(f"#{i+1} {_exp_label} - Score: {rec['score']}/100" + _arrow,
+                                  key=f"btn_rec_{i}", use_container_width=True)
+                if _clic:
+                    st.session_state[_key_rec] = not st.session_state[_key_rec]
+                if st.session_state[_key_rec]:
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.markdown(f"""
                     <div style='padding:12px; background:{color_r}18; border-left:4px solid {color_r}; border-radius:5px;'>
                         <h2 style='color:{color_r}; margin:0;'>{rec['score']}/100</h2>
                         <p style='margin:4px 0;'>{rec['descripcion']}</p>
                     </div>""", unsafe_allow_html=True)
-                    if i == 0: st.success(f"⭐ {t['mejor_opcion']}")
-                    st.markdown(f"**Competidores encontrados:** {rec['num_competidores']}")
-                with c2:
-                    st.markdown(f"**{t['inversion_estimada']}:**")
-                    st.markdown(f"${rec['inversion_min']//1000}K - ${rec['inversion_max']//1000}K MXN")
+                        if i == 0: st.success(f"⭐ {t['mejor_opcion']}")
+                        st.markdown(f"**Competidores encontrados:** {rec['num_competidores']}")
+                    with c2:
+                        st.markdown(f"**{t['inversion_estimada']}:**")
+                        st.markdown(f"${rec['inversion_min']//1000}K - ${rec['inversion_max']//1000}K MXN")
 
-        if len(recomendaciones) > top_n:
-            st.caption(f"🔒 Actualiza para ver los {len(recomendaciones) - top_n} tipos de negocio restantes")
+            if len(recomendaciones) > top_n:
+                st.caption(f"🔒 Actualiza para ver los {len(recomendaciones) - top_n} tipos de negocio restantes")
+
+            st.markdown("---")
+            st.markdown(f"### 🤖 {t['resumen']}")
+            st.markdown(analisis)
+
+            # Negocios a evitar
+            st.markdown(f"### {t['evitar']}")
+            evitar_data = [{"Tipo": r['nombre'], "Score": f"{r['score']}/100"} for r in recomendaciones[-3:]]
+            st.dataframe(evitar_data, use_container_width=True)
 
         st.markdown("---")
-        st.markdown(f"### 🤖 {t['resumen']}")
-        st.markdown(analisis)
 
-        # Negocios a evitar
-        st.markdown(f"### {t['evitar']}")
-        evitar_data = [{"Tipo": r['nombre'], "Score": f"{r['score']}/100"} for r in recomendaciones[-3:]]
-        st.dataframe(evitar_data, use_container_width=True)
+        # Competidores
+        if competidores:
+            n_mostrados = tier_info["competidores_mostrados"]
+            st.markdown(f"### {t['competencia_titulo']}")
+            comp_data = []
+            for comp in competidores[:n_mostrados]:
+                comp_data.append({
+                    t["tabla_nombre"]:  comp.get('displayName', {}).get('text', 'N/A'),
+                    t["tabla_rating"]:  f"{comp.get('rating','N/A')}★" if comp.get('rating') else 'N/A',
+                    t["tabla_reseñas"]: comp.get('userRatingCount', 0)
+                })
+            st.dataframe(comp_data, use_container_width=True)
+            if len(competidores) > n_mostrados:
+                st.caption(f"🔒 Mostrando {n_mostrados} de {len(competidores)} — actualiza tu plan para ver todos")
 
-    st.markdown("---")
-
-    # Competidores
-    if competidores:
-        n_mostrados = tier_info["competidores_mostrados"]
-        st.markdown(f"### {t['competencia_titulo']}")
-        comp_data = []
-        for comp in competidores[:n_mostrados]:
-            comp_data.append({
-                t["tabla_nombre"]:  comp.get('displayName', {}).get('text', 'N/A'),
-                t["tabla_rating"]:  f"{comp.get('rating','N/A')}★" if comp.get('rating') else 'N/A',
-                t["tabla_reseñas"]: comp.get('userRatingCount', 0)
-            })
-        st.dataframe(comp_data, use_container_width=True)
-        if len(competidores) > n_mostrados:
-            st.caption(f"🔒 Mostrando {n_mostrados} de {len(competidores)} — actualiza tu plan para ver todos")
-
-    st.markdown("---")
-
-    # Demografía — free básico, Basic+ completo
-    st.markdown(f"### {t['demografía']}")
-    st.caption(t["datos_estimados"])
-    densidad_info = formatear_densidad(demografia['densidad_hab_km2'])
-
-    if tier_info["muestra_demografia"]:
-        # Basic+: datos completos con INEGI
-        fuente = demografia.get('fuente', 'Estimación por zona')
-        st.caption(f"📊 Fuente: {fuente}")
-
-        c1, c2, c3, c4 = st.columns(4)
-        pob_actual = demografia.get('poblacion_actual', demografia.get('poblacion_estimada', 0))
-        pob_2020   = demografia.get('poblacion_2020', 0)
-        delta_pob  = f"+{pob_actual - pob_2020:,}" if pob_2020 else None
-
-        c1.metric("👥 Población " + str(datetime.datetime.now().year),
-                  f"{pob_actual:,} hab", delta_pob)
-        c2.metric("🏠 Viviendas habitadas",
-                  f"{demografia.get('viviendas_actual', demografia.get('viviendas_habitadas',0)):,}")
-        c3.metric("🏙️ Densidad",
-                  densidad_info.get('nivel', densidad_info.get('clasificacion','N/A')))
-        c4.metric("📐 Aprox/manzana",
-                  f"~{demografia.get('personas_manzana', densidad_info.get('personas_manzana',0))} personas")
-
-        st.caption(densidad_info.get('descripcion',''))
-
-        # NSE + ingreso + gasto — tarjetas visuales
         st.markdown("---")
-        st.markdown("**💰 Perfil Económico del Área**")
-        e1, e2, e3, e4 = st.columns(4)
-        nse = demografia.get('nse_predominante','C')
-        nse_colores = {"A":"#7B1FA2","A/B":"#9C27B0","B":"#1976D2","B/C+":"#0097A7",
-                       "C+":"#2E7D32","C":"#558B2F","C/D+":"#F57F17","D+":"#E65100","D/E":"#B71C1C"}
-        nse_color = nse_colores.get(nse, "#555555")
-        e1.markdown(f"""<div style='background:{nse_color}18; border-left:3px solid {nse_color};
+
+        # Demografía — free básico, Basic+ completo
+        st.markdown(f"### {t['demografía']}")
+        st.caption(t["datos_estimados"])
+        densidad_info = formatear_densidad(demografia['densidad_hab_km2'])
+
+        if tier_info["muestra_demografia"]:
+            # Basic+: datos completos con INEGI
+            fuente = demografia.get('fuente', 'Estimación por zona')
+            st.caption(f"📊 Fuente: {fuente}")
+
+            c1, c2, c3, c4 = st.columns(4)
+            pob_actual = demografia.get('poblacion_actual', demografia.get('poblacion_estimada', 0))
+            pob_2020   = demografia.get('poblacion_2020', 0)
+            delta_pob  = f"+{pob_actual - pob_2020:,}" if pob_2020 else None
+
+            c1.metric("👥 Población " + str(datetime.datetime.now().year),
+                      f"{pob_actual:,} hab", delta_pob)
+            c2.metric("🏠 Viviendas habitadas",
+                      f"{demografia.get('viviendas_actual', demografia.get('viviendas_habitadas',0)):,}")
+            c3.metric("🏙️ Densidad",
+                      densidad_info.get('nivel', densidad_info.get('clasificacion','N/A')))
+            c4.metric("📐 Aprox/manzana",
+                      f"~{demografia.get('personas_manzana', densidad_info.get('personas_manzana',0))} personas")
+
+            st.caption(densidad_info.get('descripcion',''))
+
+            # NSE + ingreso + gasto — tarjetas visuales
+            st.markdown("---")
+            st.markdown("**💰 Perfil Económico del Área**")
+            e1, e2, e3, e4 = st.columns(4)
+            nse = demografia.get('nse_predominante','C')
+            nse_colores = {"A":"#7B1FA2","A/B":"#9C27B0","B":"#1976D2","B/C+":"#0097A7",
+                           "C+":"#2E7D32","C":"#558B2F","C/D+":"#F57F17","D+":"#E65100","D/E":"#B71C1C"}
+            nse_color = nse_colores.get(nse, "#555555")
+            e1.markdown(f"""<div style='background:{nse_color}18; border-left:3px solid {nse_color};
             padding:10px; border-radius:6px;'>
             <b style='color:{nse_color}; font-size:22px;'>{nse}</b><br>
             <span style='font-size:11px; color:#666;'>NSE Predominante</span></div>""",
-            unsafe_allow_html=True)
-        e2.metric("💵 Ingreso prom/mes",
-                  f"${demografia.get('ingreso_actual', demografia.get('ingreso_promedio_mensual',0)):,}")
-        e3.metric("🛒 Gasto prom/mes",
-                  f"${demografia.get('gasto_actual', demografia.get('gasto_promedio_mensual',0)):,}")
-        tasa = demografia.get('tasa_crecimiento_pct', 0.55)
-        e4.metric("📈 Crec. anual zona", f"{tasa:.2f}%")
+                unsafe_allow_html=True)
+            e2.metric("💵 Ingreso prom/mes",
+                      f"${demografia.get('ingreso_actual', demografia.get('ingreso_promedio_mensual',0)):,}")
+            e3.metric("🛒 Gasto prom/mes",
+                      f"${demografia.get('gasto_actual', demografia.get('gasto_promedio_mensual',0)):,}")
+            tasa = demografia.get('tasa_crecimiento_pct', 0.55)
+            e4.metric("📈 Crec. anual zona", f"{tasa:.2f}%")
 
-        if tier_key in ["pro", "premium"]:
-            fuente_str = demografia.get('fuente', 'INEGI Censo 2020 · Proyección CONAPO') if demografia else ''
-            if fuente_str:
-                st.caption(f"📊 Fuente: {fuente_str}")
+            if tier_key in ["pro", "premium"]:
+                fuente_str = demografia.get('fuente', 'INEGI Censo 2020 · Proyección CONAPO') if demografia else ''
+                if fuente_str:
+                    st.caption(f"📊 Fuente: {fuente_str}")
 
-            # ── GRÁFICA EDAD Y GÉNERO ──
+                # ── GRÁFICA EDAD Y GÉNERO ──
+                st.markdown("---")
+                st.markdown("**👥 Distribución de edad y género del entorno**")
+                st.caption("Fuente: INEGI Censo 2020 · ENIGH 2022")
+                if GRAFICAS_OK and "grafica_edad_genero" in dir():
+                    try:
+                        import matplotlib.pyplot as plt
+                        _fig_eg = grafica_edad_genero(
+                            demografia,
+                            TIPOS_NEGOCIO.get(tipo_para_pro if 'tipo_para_pro' in dir() else tipo_negocio_seleccionado or '', {}).get('nombre','')
+                        )
+                        st.image(_fig_eg, use_container_width=True)
+                    except Exception as _e:
+                        st.caption(f"Gráfica no disponible: {_e}")
+
+                # ── INTERPRETACIÓN DEMOGRÁFICA ──
+                if MODULOS_OK and "interpretar_demografia_negocio" in dir():
+                    try:
+                        _tipo_nom = TIPOS_NEGOCIO.get(
+                            tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado or '', {}
+                        ).get('nombre','')
+                        _interp = interpretar_demografia_negocio(
+                            demografia, _tipo_nom,
+                            tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado or ''
+                        )
+                        for _p in _interp.split("\n\n"):
+                            if _p.strip():
+                                import re as _re
+                                _p2 = _re.sub(r'\*\*(.+?)\*\*', r'**\1**', _p.strip())
+                                st.markdown(_p2)
+                    except Exception:
+                        pass
+
+                # ── TICKET PROMEDIO COMPETENCIA (PRO) ──
+                st.markdown("---")
+                st.markdown("### 🎫 Ticket Promedio de la Competencia")
+
+                # Determinar tipo activo para el ticket
+                _tipo_tk_activo = (tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro
+                                   else tipo_negocio_seleccionado or 'default')
+
+                # Caption base — más honesta
+                _ticket_override = _get_ticket_override(_tipo_tk_activo)
+                if _ticket_override:
+                    st.caption(
+                        f"Referencia de mercado · {_ticket_override['rango_txt']} · "
+                        f"Google Places price_level no es confiable para este tipo de negocio"
+                    )
+                else:
+                    st.caption("Fuente: price_level Google Places + rangos ENIGH 2022 por categoría")
+
+                if MODULOS_OK and "calcular_ticket_competencia" in dir() and competidores:
+                    try:
+                        _tk = calcular_ticket_competencia(
+                            competidores,
+                            _tipo_tk_activo,
+                            score
+                        )
+
+                        # Override de ticket para tipos con datos no confiables
+                        if _ticket_override:
+                            _tk["ticket_competencia"] = _ticket_override["ticket_tipico"]
+                            _tk["rango_zona"]          = _ticket_override["rango_txt"]
+                            _tk["ticket_recomendado"]  = int(_ticket_override["ticket_tipico"] * 1.1)
+
+                        tk1, tk2, tk3 = st.columns(3)
+                        tk1.metric("💰 Ticket referencial zona", f"${_tk['ticket_competencia']:,} MXN")
+                        tk2.metric("📊 Nivel de precio zona", _tk['rango_zona'][:30])
+                        if tier_key == "premium":
+                            tk3.metric("✅ Ticket recomendado", f"${_tk['ticket_recomendado']:,} MXN",
+                                       help="Calculado según el score de tu ubicación")
+                        else:
+                            tk3.metric("🔒 Ticket recomendado", "Solo PREMIUM",
+                                       help="Actualiza a PREMIUM para ver el ticket recomendado para tu negocio")
+
+                        # Nota de confiabilidad — amarilla para tipos referenciales, gris para confiables
+                        _nota_tk = _get_ticket_nota(_tipo_tk_activo)
+                        if _nota_tk:
+                            st.warning(_nota_tk)
+                            if _ticket_override.get("ejemplos"):
+                                st.caption(f"📋 Rangos de referencia MX: {_ticket_override['ejemplos']}")
+                        else:
+                            st.info(_tk['interpretacion_pro'])
+
+                        _key_tk = "exp_ticket_open"
+                        if _key_tk not in st.session_state: st.session_state[_key_tk] = False
+                        if not _ticket_override:  # Solo mostrar detalle por competidor si los datos son confiables
+                            if st.button("Ver detalle por competidor" + (" ▲" if st.session_state[_key_tk] else " ▼"), key="btn_ticket_exp", use_container_width=False):
+                                st.session_state[_key_tk] = not st.session_state[_key_tk]
+                            if st.session_state[_key_tk]:
+                                for _d in _tk.get('detalle_competidores', [])[:8]:
+                                    st.markdown(f"**{_d['nombre'][:35]}** — Nivel: {_d['nivel']} → Ticket est. ${_d['ticket_estimado']:,} MXN")
+                    except Exception as _te:
+                        st.caption(f"Ticket no disponible: {_te}")
+        else:
+            # Free: solo básico
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Población",     f"{demografia.get('poblacion_estimada',0):,} hab")
+            c2.metric("Viviendas",     f"{demografia.get('viviendas_habitadas',0):,}")
+            c3.metric("Densidad",      densidad_info.get('nivel', densidad_info.get('clasificacion','N/A')))
+            c4.metric("Aprox/manzana", f"~{demografia.get('personas_manzana', densidad_info.get('personas_manzana',0))} personas")
+            st.caption(densidad_info.get('descripcion',''))
+            st.caption("🔒 NSE, ingreso promedio y análisis completo disponibles en plan Básico ($99 MXN)")
+
+        # ── PRO: Tráfico + Mercado + Forecast ──────────────────────────
+        # Se muestra tanto en "validar" como en "recomendar" (usando el #1 recomendado)
+        # tipo_para_pro ya fue definido arriba al inicio de la sección de resultados
+        if tier_key in ["pro", "premium"] and MODULOS_OK and tipo_para_pro:
             st.markdown("---")
-            st.markdown("**👥 Distribución de edad y género del entorno**")
-            st.caption("Fuente: INEGI Censo 2020 · ENIGH 2022")
-            if GRAFICAS_OK and "grafica_edad_genero" in dir():
-                try:
-                    import matplotlib.pyplot as plt
-                    _fig_eg = grafica_edad_genero(
-                        demografia,
-                        TIPOS_NEGOCIO.get(tipo_para_pro if 'tipo_para_pro' in dir() else tipo_negocio_seleccionado or '', {}).get('nombre','')
-                    )
-                    st.image(_fig_eg, use_container_width=True)
-                except Exception as _e:
-                    st.caption(f"Gráfica no disponible: {_e}")
 
-            # ── INTERPRETACIÓN DEMOGRÁFICA ──
-            if MODULOS_OK and "interpretar_demografia_negocio" in dir():
-                try:
-                    _tipo_nom = TIPOS_NEGOCIO.get(
-                        tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado or '', {}
-                    ).get('nombre','')
-                    _interp = interpretar_demografia_negocio(
-                        demografia, _tipo_nom,
-                        tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado or ''
-                    )
-                    for _p in _interp.split("\n\n"):
-                        if _p.strip():
-                            import re as _re
-                            _p2 = _re.sub(r'\*\*(.+?)\*\*', r'**\1**', _p.strip())
-                            st.markdown(_p2)
-                except Exception:
-                    pass
+            tipo_zona = contexto.get("tipo_zona", "mixto")
+            densidad_a = demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 8000))
 
-            # ── TICKET PROMEDIO COMPETENCIA (PRO) ──
-            st.markdown("---")
-            st.markdown("### 🎫 Ticket Promedio de la Competencia")
+            # Mostrar qué negocio se usa como base si es modo recomendar
+            if modo == "recomendar" and recomendaciones:
+                top1 = recomendaciones[0]
+                st.info(f"📊 Análisis PRO basado en tu negocio con mayor oportunidad: **{top1['nombre']}** (Score: {top1['score']}/100)")
 
-            # Determinar tipo activo para el ticket
-            _tipo_tk_activo = (tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro
-                               else tipo_negocio_seleccionado or 'default')
+            # ── TRÁFICO ──
+            st.markdown("### 🚗 Análisis de Tráfico Estimado")
+            trafico_data = generar_reporte_trafico(tipo_zona, tipo_para_pro, densidad_a)
+            # Formato plano de tráfico para PPTX
+            _trafico_flat = {
+                "nivel_general": trafico_data.get("nivel_general",""),
+                "dia_pico": trafico_data.get("dia_pico",""),
+                "dia_bajo": trafico_data.get("dia_bajo",""),
+                "horas_pico": trafico_data.get("horas_pico",[]),
+                "trafico_horario": trafico_data.get("trafico_horario",[]),
+            }
+            st.session_state["_trafico_data_pptx"] = _trafico_flat
 
-            # Caption base — más honesta
-            _ticket_override = _get_ticket_override(_tipo_tk_activo)
-            if _ticket_override:
-                st.caption(
-                    f"Referencia de mercado · {_ticket_override['rango_txt']} · "
-                    f"Google Places price_level no es confiable para este tipo de negocio"
-                )
-            else:
-                st.caption("Fuente: price_level Google Places + rangos ENIGH 2022 por categoría")
+            t1, t2, t3 = st.columns(3)
+            t1.metric("📊 Flujo general",   trafico_data["nivel_general"])
+            t2.metric("📅 Mejor día",        trafico_data["dia_pico"])
+            t3.metric("📅 Día más bajo",     trafico_data["dia_bajo"])
 
-            if MODULOS_OK and "calcular_ticket_competencia" in dir() and competidores:
-                try:
-                    _tk = calcular_ticket_competencia(
-                        competidores,
-                        _tipo_tk_activo,
-                        score
-                    )
-
-                    # Override de ticket para tipos con datos no confiables
-                    if _ticket_override:
-                        _tk["ticket_competencia"] = _ticket_override["ticket_tipico"]
-                        _tk["rango_zona"]          = _ticket_override["rango_txt"]
-                        _tk["ticket_recomendado"]  = int(_ticket_override["ticket_tipico"] * 1.1)
-
-                    tk1, tk2, tk3 = st.columns(3)
-                    tk1.metric("💰 Ticket referencial zona", f"${_tk['ticket_competencia']:,} MXN")
-                    tk2.metric("📊 Nivel de precio zona", _tk['rango_zona'][:30])
-                    if tier_key == "premium":
-                        tk3.metric("✅ Ticket recomendado", f"${_tk['ticket_recomendado']:,} MXN",
-                                   help="Calculado según el score de tu ubicación")
-                    else:
-                        tk3.metric("🔒 Ticket recomendado", "Solo PREMIUM",
-                                   help="Actualiza a PREMIUM para ver el ticket recomendado para tu negocio")
-
-                    # Nota de confiabilidad — amarilla para tipos referenciales, gris para confiables
-                    _nota_tk = _get_ticket_nota(_tipo_tk_activo)
-                    if _nota_tk:
-                        st.warning(_nota_tk)
-                        if _ticket_override.get("ejemplos"):
-                            st.caption(f"📋 Rangos de referencia MX: {_ticket_override['ejemplos']}")
-                    else:
-                        st.info(_tk['interpretacion_pro'])
-
-                    _key_tk = "exp_ticket_open"
-                    if _key_tk not in st.session_state: st.session_state[_key_tk] = False
-                    if not _ticket_override:  # Solo mostrar detalle por competidor si los datos son confiables
-                        if st.button("Ver detalle por competidor" + (" ▲" if st.session_state[_key_tk] else " ▼"), key="btn_ticket_exp", use_container_width=False):
-                            st.session_state[_key_tk] = not st.session_state[_key_tk]
-                        if st.session_state[_key_tk]:
-                            for _d in _tk.get('detalle_competidores', [])[:8]:
-                                st.markdown(f"**{_d['nombre'][:35]}** — Nivel: {_d['nivel']} → Ticket est. ${_d['ticket_estimado']:,} MXN")
-                except Exception as _te:
-                    st.caption(f"Ticket no disponible: {_te}")
-    else:
-        # Free: solo básico
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Población",     f"{demografia.get('poblacion_estimada',0):,} hab")
-        c2.metric("Viviendas",     f"{demografia.get('viviendas_habitadas',0):,}")
-        c3.metric("Densidad",      densidad_info.get('nivel', densidad_info.get('clasificacion','N/A')))
-        c4.metric("Aprox/manzana", f"~{demografia.get('personas_manzana', densidad_info.get('personas_manzana',0))} personas")
-        st.caption(densidad_info.get('descripcion',''))
-        st.caption("🔒 NSE, ingreso promedio y análisis completo disponibles en plan Básico ($99 MXN)")
-
-    # ── PRO: Tráfico + Mercado + Forecast ──────────────────────────
-    # Se muestra tanto en "validar" como en "recomendar" (usando el #1 recomendado)
-    # tipo_para_pro ya fue definido arriba al inicio de la sección de resultados
-    if tier_key in ["pro", "premium"] and MODULOS_OK and tipo_para_pro:
-        st.markdown("---")
-
-        tipo_zona = contexto.get("tipo_zona", "mixto")
-        densidad_a = demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 8000))
-
-        # Mostrar qué negocio se usa como base si es modo recomendar
-        if modo == "recomendar" and recomendaciones:
-            top1 = recomendaciones[0]
-            st.info(f"📊 Análisis PRO basado en tu negocio con mayor oportunidad: **{top1['nombre']}** (Score: {top1['score']}/100)")
-
-        # ── TRÁFICO ──
-        st.markdown("### 🚗 Análisis de Tráfico Estimado")
-        trafico_data = generar_reporte_trafico(tipo_zona, tipo_para_pro, densidad_a)
-        # Formato plano de tráfico para PPTX
-        _trafico_flat = {
-            "nivel_general": trafico_data.get("nivel_general",""),
-            "dia_pico": trafico_data.get("dia_pico",""),
-            "dia_bajo": trafico_data.get("dia_bajo",""),
-            "horas_pico": trafico_data.get("horas_pico",[]),
-            "trafico_horario": trafico_data.get("trafico_horario",[]),
-        }
-        st.session_state["_trafico_data_pptx"] = _trafico_flat
-
-        t1, t2, t3 = st.columns(3)
-        t1.metric("📊 Flujo general",   trafico_data["nivel_general"])
-        t2.metric("📅 Mejor día",        trafico_data["dia_pico"])
-        t3.metric("📅 Día más bajo",     trafico_data["dia_bajo"])
-
-        st.markdown("**🕐 Horas pico para tu tipo de negocio:**")
-        for pico in trafico_data["horas_pico"]:
-            color_p = "#1F9D57" if pico["flujo"] >= 80 else "#D98A1F" if pico["flujo"] >= 60 else "#9E9E9E"
-            st.markdown(f"""<div style='display:inline-block; margin:4px; padding:8px 16px;
+            st.markdown("**🕐 Horas pico para tu tipo de negocio:**")
+            for pico in trafico_data["horas_pico"]:
+                color_p = "#1F9D57" if pico["flujo"] >= 80 else "#D98A1F" if pico["flujo"] >= 60 else "#9E9E9E"
+                st.markdown(f"""<div style='display:inline-block; margin:4px; padding:8px 16px;
                 background:{color_p}22; border:1px solid {color_p}; border-radius:8px; font-size:13px;'>
                 <b>{pico["hora_str"]}</b> — {pico["nivel"]} ({pico["flujo"]}%)
                 </div>""", unsafe_allow_html=True)
-        st.markdown("")
+            st.markdown("")
 
-        # Gráfica horaria con barras ASCII → visual con HTML
-        st.markdown("**📈 Perfil de flujo horario (0h – 23h):**")
-        horas_html = "<div style='display:flex; align-items:flex-end; gap:2px; height:80px; margin:8px 0;'>"
-        for hora, val in enumerate(trafico_data["trafico_horario"]):
-            color_b = "#13243B" if val >= 70 else "#2A6FDB" if val >= 45 else "#E0E0E0"
-            tooltip = f"{hora:02d}h: {val}%"
-            horas_html += f"""<div title='{tooltip}' style='
+            # Gráfica horaria con barras ASCII → visual con HTML
+            st.markdown("**📈 Perfil de flujo horario (0h – 23h):**")
+            horas_html = "<div style='display:flex; align-items:flex-end; gap:2px; height:80px; margin:8px 0;'>"
+            for hora, val in enumerate(trafico_data["trafico_horario"]):
+                color_b = "#13243B" if val >= 70 else "#2A6FDB" if val >= 45 else "#E0E0E0"
+                tooltip = f"{hora:02d}h: {val}%"
+                horas_html += f"""<div title='{tooltip}' style='
                 flex:1; background:{color_b}; height:{val}%;
                 border-radius:2px 2px 0 0; min-height:3px;'></div>"""
-        horas_html += "</div>"
-        horas_html += "<div style='display:flex; justify-content:space-between; font-size:10px; color:#888;'><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>"
-        st.markdown(horas_html, unsafe_allow_html=True)
+            horas_html += "</div>"
+            horas_html += "<div style='display:flex; justify-content:space-between; font-size:10px; color:#888;'><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>"
+            st.markdown(horas_html, unsafe_allow_html=True)
 
-        # Tráfico semanal
-        st.markdown("**📅 Flujo por día de la semana:**")
-        dias_html = "<div style='display:flex; gap:6px; margin:8px 0;'>"
-        for i, (dia, val) in enumerate(zip(DIAS_SEMANA, trafico_data["trafico_semanal"])):
-            color_d = "#13243B" if val >= 85 else "#2A6FDB" if val >= 65 else "#E0E0E0"
-            txt_color = "white" if val >= 65 else "#555"
-            dias_html += f"""<div style='flex:1; background:{color_d}; color:{txt_color};
+            # Tráfico semanal
+            st.markdown("**📅 Flujo por día de la semana:**")
+            dias_html = "<div style='display:flex; gap:6px; margin:8px 0;'>"
+            for i, (dia, val) in enumerate(zip(DIAS_SEMANA, trafico_data["trafico_semanal"])):
+                color_d = "#13243B" if val >= 85 else "#2A6FDB" if val >= 65 else "#E0E0E0"
+                txt_color = "white" if val >= 65 else "#555"
+                dias_html += f"""<div style='flex:1; background:{color_d}; color:{txt_color};
                 text-align:center; padding:8px 4px; border-radius:6px; font-size:11px; font-weight:bold;'>
                 {dia[:3]}<br><span style='font-size:13px;'>{val}%</span></div>"""
-        dias_html += "</div>"
-        st.markdown(dias_html, unsafe_allow_html=True)
-        st.caption("⚠️ Estimación basada en perfil de zona + tipo de negocio. No refleja datos de tráfico en tiempo real.")
+            dias_html += "</div>"
+            st.markdown(dias_html, unsafe_allow_html=True)
+            st.caption("⚠️ Estimación basada en perfil de zona + tipo de negocio. No refleja datos de tráfico en tiempo real.")
 
-        st.markdown("---")
+            st.markdown("---")
 
-        # ── MERCADO POTENCIAL ──
-        st.markdown("### 📊 Tamaño de Mercado Potencial")
-        mercado = calcular_mercado_potencial(demografia, tipo_para_pro, len(competidores), competidores)
-        _mercado_flat = {
-            "mercado_total": mercado.get("mercado_total_mensual",0),
-            "mercado_capturable": mercado.get("mercado_captura_mensual",0),
-            "clientes_potenciales_dia": mercado.get("clientes_dia_estimados",0),
-            "penetracion_estimada_pct": mercado.get("factor_captura_pct",15),
-        }
-        st.session_state["_mercado_data_pptx"] = _mercado_flat
+            # ── MERCADO POTENCIAL ──
+            st.markdown("### 📊 Tamaño de Mercado Potencial")
+            mercado = calcular_mercado_potencial(demografia, tipo_para_pro, len(competidores), competidores)
+            _mercado_flat = {
+                "mercado_total": mercado.get("mercado_total_mensual",0),
+                "mercado_capturable": mercado.get("mercado_captura_mensual",0),
+                "clientes_potenciales_dia": mercado.get("clientes_dia_estimados",0),
+                "penetracion_estimada_pct": mercado.get("factor_captura_pct",15),
+            }
+            st.session_state["_mercado_data_pptx"] = _mercado_flat
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("🏪 Mercado total área/mes", f"${mercado['mercado_total_mensual']:,}")
-        m2.metric(f"🎯 Tu captura estimada ({mercado['factor_captura_pct']:.0f}%)",
-                  f"${mercado['mercado_captura_mensual']:,}/mes")
-        m3.metric("👤 Clientes/día estimados", str(mercado["clientes_dia_estimados"]))
-        if mercado.get("es_nicho"):
-            dias_op = mercado.get("dias_operacion", 26)
-            ticket_op = mercado.get("ticket_promedio", 0)
-            clientes_op = mercado.get("clientes_dia_estimados", 0)
-            ingreso_op = mercado["ingreso_operativo_mensual"]
-            st.info(f"💰 **Ingreso operativo estimado: ${ingreso_op:,}/mes** — {clientes_op} clientes × ${ticket_op} ticket × {dias_op} días hábiles")
-        st.caption(f"📐 Metodología: {mercado['metodologia']}")
-        st.caption("⚠️ Es un estimado de mercado, no una cifra garantizada — puede variar según la capacidad/tamaño del local, tu estrategia en redes sociales y qué tan diferenciado seas frente a la competencia.")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("🏪 Mercado total área/mes", f"${mercado['mercado_total_mensual']:,}")
+            m2.metric(f"🎯 Tu captura estimada ({mercado['factor_captura_pct']:.0f}%)",
+                      f"${mercado['mercado_captura_mensual']:,}/mes")
+            m3.metric("👤 Clientes/día estimados", str(mercado["clientes_dia_estimados"]))
+            if mercado.get("es_nicho"):
+                dias_op = mercado.get("dias_operacion", 26)
+                ticket_op = mercado.get("ticket_promedio", 0)
+                clientes_op = mercado.get("clientes_dia_estimados", 0)
+                ingreso_op = mercado["ingreso_operativo_mensual"]
+                st.info(f"💰 **Ingreso operativo estimado: ${ingreso_op:,}/mes** — {clientes_op} clientes × ${ticket_op} ticket × {dias_op} días hábiles")
+            st.caption(f"📐 Metodología: {mercado['metodologia']}")
+            st.caption("⚠️ Es un estimado de mercado, no una cifra garantizada — puede variar según la capacidad/tamaño del local, tu estrategia en redes sociales y qué tan diferenciado seas frente a la competencia.")
 
-        st.markdown("---")
+            st.markdown("---")
 
-        # ── FORECAST ──
-        tipo_info_fc = TIPOS_NEGOCIO[tipo_para_pro]
-        forecast = generar_forecast(mercado, tipo_para_pro, score,
-                                    tipo_info_fc["inversion_min"])
-        roi_data = calcular_roi(forecast, tipo_info_fc["inversion_min"],
-                                tipo_info_fc["inversion_max"], tipo_para_pro)
-        # Convertir estructura anidada a formato plano para el PPTX
-        _forecast_flat = {
-            "pesimista": forecast["escenarios"]["pesimista"]["promedio_mensual"],
-            "realista":  forecast["escenarios"]["base"]["promedio_mensual"],
-            "optimista": forecast["escenarios"]["optimista"]["promedio_mensual"],
-            "nota": ("; ".join(forecast.get("supuestos", [])[:2])),
-        }
-        _roi_flat = {
-            "inversion_min": roi_data.get("inversion_min", 0),
-            "inversion_max": roi_data.get("inversion_max", 0),
-            "retorno_mensual": roi_data.get("utilidad_mensual_est", 0),
-            "meses_recuperacion_realista": roi_data.get("meses_recuperacion", "—"),
-            "roi_anual_pct": roi_data.get("roi_12m_pct", "—"),
-        }
-        st.session_state["_forecast_data_pptx"] = _forecast_flat
-        st.session_state["_roi_data_pptx"] = _roi_flat
+            # ── FORECAST ──
+            tipo_info_fc = TIPOS_NEGOCIO[tipo_para_pro]
+            forecast = generar_forecast(mercado, tipo_para_pro, score,
+                                        tipo_info_fc["inversion_min"])
+            roi_data = calcular_roi(forecast, tipo_info_fc["inversion_min"],
+                                    tipo_info_fc["inversion_max"], tipo_para_pro)
+            # Convertir estructura anidada a formato plano para el PPTX
+            _forecast_flat = {
+                "pesimista": forecast["escenarios"]["pesimista"]["promedio_mensual"],
+                "realista":  forecast["escenarios"]["base"]["promedio_mensual"],
+                "optimista": forecast["escenarios"]["optimista"]["promedio_mensual"],
+                "nota": ("; ".join(forecast.get("supuestos", [])[:2])),
+            }
+            _roi_flat = {
+                "inversion_min": roi_data.get("inversion_min", 0),
+                "inversion_max": roi_data.get("inversion_max", 0),
+                "retorno_mensual": roi_data.get("utilidad_mensual_est", 0),
+                "meses_recuperacion_realista": roi_data.get("meses_recuperacion", "—"),
+                "roi_anual_pct": roi_data.get("roi_12m_pct", "—"),
+            }
+            st.session_state["_forecast_data_pptx"] = _forecast_flat
+            st.session_state["_roi_data_pptx"] = _roi_flat
 
-        st.markdown("### 📈 Forecast de Ventas — 12 Meses (3 Escenarios)")
-        f1, f2, f3 = st.columns(3)
+            st.markdown("### 📈 Forecast de Ventas — 12 Meses (3 Escenarios)")
+            f1, f2, f3 = st.columns(3)
 
-        for col, escenario, color_e, emoji_e in [
-            (f1, "pesimista", "#E0524A", "🔴"),
-            (f2, "base",      "#2A6FDB", "🟡"),
-            (f3, "optimista", "#1F9D57", "🟢"),
-        ]:
-            datos_e = forecast["escenarios"][escenario]
-            col.markdown(f"""<div style='background:{color_e}11; border:1px solid {color_e};
+            for col, escenario, color_e, emoji_e in [
+                (f1, "pesimista", "#E0524A", "🔴"),
+                (f2, "base",      "#2A6FDB", "🟡"),
+                (f3, "optimista", "#1F9D57", "🟢"),
+            ]:
+                datos_e = forecast["escenarios"][escenario]
+                col.markdown(f"""<div style='background:{color_e}11; border:1px solid {color_e};
                 border-radius:10px; padding:14px; text-align:center;'>
                 <div style='font-size:13px; color:{color_e}; font-weight:bold;'>{emoji_e} {escenario.upper()}</div>
                 <div style='font-size:22px; font-weight:bold; color:{color_e}; margin:6px 0;'>
@@ -6795,308 +7709,309 @@ if "resultados" in st.session_state:
                     ${datos_e["total_anual"]:,} año 1</div>
                 </div>""", unsafe_allow_html=True)
 
-        # Gráfica de líneas 12 meses con matplotlib (colores 4SITE)
-        st.markdown("**Ventas mensuales — 3 escenarios:**")
-        if GRAFICAS_OK:
-            try:
-                _buf_fc = grafica_forecast(forecast)
-                st.image(_buf_fc, use_container_width=True)
-            except Exception as _efc:
-                # Fallback: barras HTML
-                _meses_fc = forecast["escenarios"]["base"]["ventas_mensuales"]
-                _max_fc = max(_meses_fc) or 1
-                _html_fc = "<div style='display:flex;align-items:flex-end;gap:3px;height:80px;margin:8px 0;'>"
-                for _i, _v in enumerate(_meses_fc):
-                    _pct = int(_v / _max_fc * 100)
-                    _html_fc += (f"<div style='flex:1;display:flex;flex-direction:column;align-items:center;'>"
-                                 f"<div style='background:#2A6FDB;width:100%;height:{_pct}%;border-radius:3px 3px 0 0;min-height:3px;'></div>"
-                                 f"<div style='font-size:9px;color:#888;margin-top:2px;'>M{_i+1}</div></div>")
-                _html_fc += "</div>"
-                st.markdown(_html_fc, unsafe_allow_html=True)
+            # Gráfica de líneas 12 meses con matplotlib (colores 4SITE)
+            st.markdown("**Ventas mensuales — 3 escenarios:**")
+            if GRAFICAS_OK:
+                try:
+                    _buf_fc = grafica_forecast(forecast)
+                    st.image(_buf_fc, use_container_width=True)
+                except Exception as _efc:
+                    # Fallback: barras HTML
+                    _meses_fc = forecast["escenarios"]["base"]["ventas_mensuales"]
+                    _max_fc = max(_meses_fc) or 1
+                    _html_fc = "<div style='display:flex;align-items:flex-end;gap:3px;height:80px;margin:8px 0;'>"
+                    for _i, _v in enumerate(_meses_fc):
+                        _pct = int(_v / _max_fc * 100)
+                        _html_fc += (f"<div style='flex:1;display:flex;flex-direction:column;align-items:center;'>"
+                                     f"<div style='background:#2A6FDB;width:100%;height:{_pct}%;border-radius:3px 3px 0 0;min-height:3px;'></div>"
+                                     f"<div style='font-size:9px;color:#888;margin-top:2px;'>M{_i+1}</div></div>")
+                    _html_fc += "</div>"
+                    st.markdown(_html_fc, unsafe_allow_html=True)
 
-        _key_sup = "exp_supuestos_open"
-        if _key_sup not in st.session_state: st.session_state[_key_sup] = False
-        if st.button("Supuestos del forecast" + (" ▲" if st.session_state[_key_sup] else " ▼"), key="btn_sup_exp"):
-            st.session_state[_key_sup] = not st.session_state[_key_sup]
-        if st.session_state[_key_sup]:
-            for sup in forecast["supuestos"]:
-                st.caption(f"• {sup}")
+            _key_sup = "exp_supuestos_open"
+            if _key_sup not in st.session_state: st.session_state[_key_sup] = False
+            if st.button("Supuestos del forecast" + (" ▲" if st.session_state[_key_sup] else " ▼"), key="btn_sup_exp"):
+                st.session_state[_key_sup] = not st.session_state[_key_sup]
+            if st.session_state[_key_sup]:
+                for sup in forecast["supuestos"]:
+                    st.caption(f"• {sup}")
+
+            st.markdown("---")
+
+            # ── ROI ── (PREMIUM)
+            if tier_key == "premium":
+                st.markdown("### 💰 ROI + Punto de Equilibrio")
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("📊 ROI estimado 12m", f"{roi_data['roi_12m_pct']}%")
+                r2.metric("⏱️ Recuperación est.", f"{roi_data['meses_recuperacion']} meses")
+                r3.metric("💵 Utilidad mensual est.", f"${roi_data['utilidad_mensual_est']:,}")
+                r4.metric("⚖️ Punto de equilibrio", f"${roi_data['punto_eq_ventas_mes']:,}/mes")
+                st.markdown(f"**Clasificación:** {roi_data['clasificacion_roi']}")
+                st.caption("⚠️ Estimaciones con supuestos estándar. Los resultados reales dependen de gestión, producto y mercado.")
+
+        # ── BÚSQUEDA DE ZONA IDEAL — temporalmente bloqueada ──
+        _lat_zona = lat if 'lat' in dir() and lat else None
+        _lng_zona = lng if 'lng' in dir() and lng else None
+        if tier_key == "pro" and _lat_zona and _lng_zona:
+            st.markdown("---")
+            st.info("🔧 **¿Dónde más podría funcionar este negocio?** — Esta función está en mantenimiento y estará disponible muy pronto.")
+
+        # ── MAPAS AVANZADOS (PRO y PREMIUM) — fuera del bloque de cálculo ──
+        if tier_key in ["pro", "premium"]:
+            st.markdown("---")
+            st.markdown("### 🗺️ Mapas Avanzados")
+            # Asegurar que competidores y coordenadas están disponibles
+            _comp_mapas = competidores or []
+            _tipo_mapas = (tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro
+                           else tipo_negocio_seleccionado or
+                           (recomendaciones[0]['tipo_key'] if recomendaciones else None))
+
+            if MAPAS_OK and lat and lng:
+                tab_comp, tab_heat, tab_iso, tab_cani, tab_vial = st.tabs([
+                    "📍 Competidores", "🔥 Heatmap", "⏱️ Isócronas", "⚠️ Canibalización", "🛣️ Vialidades"
+                ])
+
+                with tab_comp:
+                    st.caption("Competidores coloreados por rating en tu radio de 500m")
+                    try:
+                        tipo_nombre_m = TIPOS_NEGOCIO.get(_tipo_mapas, {}).get('nombre','') if _tipo_mapas else ''
+                        mapa_c, interp_c = crear_mapa_competidores(
+                            lat, lng, _comp_mapas, tipo_nombre_m, idioma)
+                        render_mapa_con_interpretacion(mapa_c, interp_c, altura=420)
+                    except Exception as e_mc:
+                        st.error(f"Error en mapa de competidores: {e_mc}")
+
+                with tab_heat:
+                    st.caption("Densidad de competencia ponderada por rating y número de reseñas")
+                    try:
+                        mapa_h, interp_h = crear_heatmap_competencia(lat, lng, _comp_mapas, idioma)
+                        render_mapa_con_interpretacion(mapa_h, interp_h, altura=420)
+                    except Exception as e_mh:
+                        st.error(f"Error en heatmap: {e_mh}")
+
+                with tab_iso:
+                    perfil_iso = st.radio("Modo de desplazamiento:",
+                        ["foot-walking", "driving-car"],
+                        format_func=lambda x: "🚶 A pie" if x == "foot-walking" else "🚗 En auto",
+                        horizontal=True, key="radio_iso")
+                    if not ORS_API_KEY:
+                        st.info("💡 Mostrando isócronas estimadas por distancia. Para isócronas reales "
+                                "por red vial agrega `ORS_API_KEY` a tu `.env` (gratis en openrouteservice.org).")
+                    try:
+                        mapa_iso, interp_iso = crear_mapa_isocronas(
+                            lat, lng, ORS_API_KEY, [5, 10, 15], perfil_iso, _comp_mapas, idioma)
+                        render_mapa_con_interpretacion(mapa_iso, interp_iso, altura=420)
+                    except Exception as e_iso:
+                        st.error(f"Error en isócronas: {e_iso}")
+
+                with tab_cani:
+                    st.caption("Identifica competidores que comparten tu área de influencia inmediata")
+                    try:
+                        mapa_cani, interp_cani, datos_cani = crear_mapa_canibalizacion(
+                            lat, lng, _comp_mapas, 500, idioma)
+                        render_mapa_con_interpretacion(mapa_cani, interp_cani, altura=400)
+                        if datos_cani["muy_cercanos"]:
+                            st.markdown("**⚠️ Competidores críticos (≤150m) — riesgo alto de canibalización:**")
+                            crit_data = [{
+                                "Nombre": c.get('displayName',{}).get('text','N/A')[:25],
+                                "Distancia": f"{c.get('_distancia_m',0)}m",
+                                "Rating": c.get('rating','N/A'),
+                                "Reseñas": c.get('userRatingCount',0)
+                            } for c in datos_cani["muy_cercanos"]]
+                            st.dataframe(crit_data, use_container_width=True)
+                        elif not datos_cani["muy_cercanos"] and not datos_cani["cercanos"]:
+                            st.success("✅ Sin riesgo de canibalización — no hay competidores directos en los primeros 300m")
+                    except Exception as e_cani:
+                        st.error(f"Error en mapa de canibalización: {e_cani}")
+                with tab_vial:
+                    st.caption("Vialidades cercanas clasificadas por nivel de flujo vehicular")
+                    st.info("🛣️ Clasifica las calles del entorno en primarias, comerciales y locales. Útil para evaluar visibilidad y tráfico de paso.")
+                    try:
+                        mapa_vial, interp_vial = crear_mapa_vialidades(lat, lng, GOOGLE_API_KEY, _comp_mapas, idioma)
+                        render_mapa_con_interpretacion(mapa_vial, interp_vial, altura=440, titulo="🛣️ Vialidades y movilidad del entorno")
+                    except Exception as e_vial:
+                        st.error(f"Error en mapa de vialidades: {e_vial}")
+
+            elif not MAPAS_OK:
+                st.warning("Instala `streamlit-folium` para ver mapas avanzados: `pip install streamlit-folium folium`")
+
+        # ── COMPARATIVA (PREMIUM en modo validar/recomendar, NO zona_potencial) ──
+        if tier_key == "premium" and modo in ["validar", "recomendar"]:
+            st.markdown("---")
+            st.markdown("### 🗺️ Comparativa de Ubicaciones")
+            st.caption("Analiza hasta 3 ubicaciones en paralelo y encuentra la mejor opción.")
+
+            if "ubicaciones_comparativa" not in st.session_state:
+                st.session_state.ubicaciones_comparativa = []
+
+            _key_comp2 = "exp_comp2_open"
+            if _key_comp2 not in st.session_state: st.session_state[_key_comp2] = False
+            if st.button("+ Agregar ubicaciones para comparar" + (" ▲" if st.session_state[_key_comp2] else " ▼"), key="btn_comp2_exp", use_container_width=True):
+                st.session_state[_key_comp2] = not st.session_state[_key_comp2]
+            if st.session_state[_key_comp2]:
+                pass
+            if st.session_state.get(_key_comp2, False):
+                col_a, col_b = st.columns([3,1])
+                with col_a:
+                    nueva_ub = st.text_input("Dirección adicional a comparar:",
+                        placeholder="Ej: Av. Reforma 222, CDMX", key="nueva_ub_input")
+                with col_b:
+                    if st.button("Agregar", key="btn_agregar_ub"):
+                        if not nueva_ub:
+                            st.warning("Escribe una dirección primero")
+                        elif len(st.session_state.ubicaciones_comparativa) >= 2:
+                            st.warning("Máximo 2 ubicaciones adicionales (3 en total)")
+                        else:
+                            with st.spinner(f"Analizando {nueva_ub[:30]}..."):
+                                try:
+                                    lat2, lng2 = geocodificar_direccion(nueva_ub)
+                                    if not lat2 or not lng2:
+                                        st.error("No se pudo geocodificar la dirección")
+                                    else:
+                                        # Tipo de negocio para comparar
+                                        tipo_comp = tipo_para_pro if 'tipo_para_pro' in dir() else tipo_negocio_seleccionado
+                                        dem2   = obtener_demografia(lat2, lng2, nueva_ub)
+                                        comps2 = buscar_competencia_por_tipo(lat2, lng2, tipo_comp) if tipo_comp else []
+                                        score2_b, desglose2 = calcular_score_competencia(comps2, tipo_comp) if (tipo_comp and comps2) else (0, {})
+                                        ctx2   = detectar_contexto_ubicacion(lat2, lng2, nueva_ub)
+                                        score2_c = ajustar_score_por_contexto(score2_b, tipo_comp, ctx2) if tipo_comp else score2_b
+                                        score2   = ajustar_score_por_demografia(score2_c, tipo_comp, dem2) if tipo_comp else score2_c
+                                        st.session_state.ubicaciones_comparativa.append({
+                                            "nombre": nueva_ub[:25],
+                                            "score": score2,
+                                            "densidad_comp": desglose2.get("densidad", 0),
+                                            "calidad_comp":  desglose2.get("calidad", 0),
+                                            "consolidacion": desglose2.get("consolidacion", 0),
+                                            "poblacion":     dem2.get("poblacion_actual", dem2.get("poblacion_estimada", 0)),
+                                            "nse":           dem2.get("nse_predominante", "C"),
+                                            "ingreso":       dem2.get("ingreso_actual", dem2.get("ingreso_promedio_mensual", 0)),
+                                            "num_competidores": len(comps2),
+                                        })
+                                        st.success(f"✅ Agregada: {nueva_ub[:30]} — Score: {score2}/100")
+                                        st.rerun()
+                                except Exception as e_comp:
+                                    st.error(f"Error al analizar: {e_comp}")
+
+            # Mostrar comparativa si hay ubicaciones
+            # Fix: desglose puede ser dict, lista de tuplas, o None
+            def _get_desglose_val(dsg, key, default=0):
+                if isinstance(dsg, dict): return dsg.get(key, default)
+                if isinstance(dsg, (list, tuple)):
+                    for item in dsg:
+                        if isinstance(item, (list,tuple)) and len(item)>=2:
+                            if str(item[0]).lower() == key: return item[1]
+                return default
+
+            todas_ubs = [{
+                "nombre": ubicacion[:25],
+                "score": float(score),
+                "densidad_comp": _get_desglose_val(desglose, "densidad"),
+                "calidad_comp":  _get_desglose_val(desglose, "calidad"),
+                "consolidacion": _get_desglose_val(desglose, "consolidacion"),
+                "poblacion": (demografia or {}).get("poblacion_actual",
+                              (demografia or {}).get("poblacion_estimada",0)),
+                "nse":    (demografia or {}).get("nse_predominante","C"),
+                "ingreso":(demografia or {}).get("ingreso_actual",
+                           (demografia or {}).get("ingreso_promedio_mensual",0)),
+                "num_competidores": len(competidores or []),
+            }] + st.session_state.ubicaciones_comparativa
+
+            if len(todas_ubs) > 1 and GRAFICAS_OK:
+                try:
+                    graf_comp = grafica_comparativa(todas_ubs)
+                    if graf_comp:
+                        st.image(graf_comp, use_container_width=True,
+                                 caption="Análisis comparativo — radar y barras por ubicación")
+                except Exception as e_graf:
+                    st.caption(f"Gráfica comparativa no disponible: {e_graf}")
+
+                # Tabla resumen
+                comp_table_data = []
+                for ub in todas_ubs:
+                    nivel_c, _ = nivel_score(ub['score'], idioma)
+                    comp_table_data.append({
+                        "Ubicación": ub['nombre'],
+                        "Score": f"{ub['score']}/100",
+                        "Nivel": nivel_c,
+                        "Competidores": ub['num_competidores'],
+                        "NSE": ub['nse'],
+                        "Ingreso prom": f"${ub['ingreso']:,}",
+                    })
+                st.dataframe(comp_table_data, use_container_width=True)
+
+                # Recomendación automática
+                mejor = max(todas_ubs, key=lambda x: x['score'])
+                st.success(f"✅ **Recomendación:** La mejor ubicación es **{mejor['nombre']}** con score {mejor['score']}/100")
+
+            if st.button("🗑️ Limpiar comparativa", key="btn_limpiar"):
+                st.session_state.ubicaciones_comparativa = []
+                st.rerun()
 
         st.markdown("---")
 
-        # ── ROI ── (PREMIUM)
-        if tier_key == "premium":
-            st.markdown("### 💰 ROI + Punto de Equilibrio")
-            r1, r2, r3, r4 = st.columns(4)
-            r1.metric("📊 ROI estimado 12m", f"{roi_data['roi_12m_pct']}%")
-            r2.metric("⏱️ Recuperación est.", f"{roi_data['meses_recuperacion']} meses")
-            r3.metric("💵 Utilidad mensual est.", f"${roi_data['utilidad_mensual_est']:,}")
-            r4.metric("⚖️ Punto de equilibrio", f"${roi_data['punto_eq_ventas_mes']:,}/mes")
-            st.markdown(f"**Clasificación:** {roi_data['clasificacion_roi']}")
-            st.caption("⚠️ Estimaciones con supuestos estándar. Los resultados reales dependen de gestión, producto y mercado.")
+        # ── DIAGNÓSTICO COMERCIAL AL FINAL (Basic, PRO, PREMIUM) ──────
+        if tier_key != "free":
+            st.markdown("### ✅ Recomendación Final")
 
-    # ── BÚSQUEDA DE ZONA IDEAL — temporalmente bloqueada ──
-    _lat_zona = lat if 'lat' in dir() and lat else None
-    _lng_zona = lng if 'lng' in dir() and lng else None
-    if tier_key == "pro" and _lat_zona and _lng_zona:
-        st.markdown("---")
-        st.info("🔧 **¿Dónde más podría funcionar este negocio?** — Esta función está en mantenimiento y estará disponible muy pronto.")
+            _trafico_diag = _mercado_diag = _forecast_diag = _roi_diag = None
+            if tier_key in ["pro", "premium"] and MODULOS_OK:
+                _tipo_diag = tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado
+                if _tipo_diag:
+                    try:
+                        _tz  = contexto.get("tipo_zona", "mixto")
+                        _den = demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 8000))
+                        _trafico_diag  = generar_reporte_trafico(_tz, _tipo_diag, _den)
+                        _mercado_diag  = calcular_mercado_potencial(demografia, _tipo_diag, len(competidores), competidores)
+                        _tipo_info_d   = TIPOS_NEGOCIO.get(_tipo_diag, {})
+                        _forecast_diag = generar_forecast(_mercado_diag, _tipo_diag, score,
+                                                           _tipo_info_d.get("inversion_min", 300000))
+                        _roi_diag      = calcular_roi(_forecast_diag,
+                                                       _tipo_info_d.get("inversion_min", 300000),
+                                                       _tipo_info_d.get("inversion_max", 600000), _tipo_diag)
+                    except:
+                        pass
 
-    # ── MAPAS AVANZADOS (PRO y PREMIUM) — fuera del bloque de cálculo ──
-    if tier_key in ["pro", "premium"]:
-        st.markdown("---")
-        st.markdown("### 🗺️ Mapas Avanzados")
-        # Asegurar que competidores y coordenadas están disponibles
-        _comp_mapas = competidores or []
-        _tipo_mapas = (tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro
-                       else tipo_negocio_seleccionado or
-                       (recomendaciones[0]['tipo_key'] if recomendaciones else None))
+            with st.spinner("🏆 Generando Recomendación Final..."):
+                # Calcular ticket_data para la recomendación final
+                _ticket_diag = None
+                if MODULOS_OK and competidores:
+                    try:
+                        _tipo_t = tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado
+                        if _tipo_t:
+                            _ticket_diag = calcular_ticket_competencia(competidores, _tipo_t, score)
+                    except Exception:
+                        pass
 
-        if MAPAS_OK and lat and lng:
-            tab_comp, tab_heat, tab_iso, tab_cani, tab_vial = st.tabs([
-                "📍 Competidores", "🔥 Heatmap", "⏱️ Isócronas", "⚠️ Canibalización", "🛣️ Vialidades"
-            ])
+                # Reutiliza el diagnóstico ya generado por el dashboard (evita otra llamada a Claude)
+                diagnostico = (st.session_state.get("_dash_cache") or {}).get("data", {}).get("_diag_texto") or generar_recomendacion_final(
+                    ubicacion=ubicacion, score=score, desglose=desglose,
+                    competidores=competidores, demografia=demografia,
+                    contexto=contexto, idioma=idioma, tier_key=tier_key, modo=modo,
+                    tipo_negocio=tipo_negocio_seleccionado if modo == "validar" else None,
+                    recomendaciones=recomendaciones,
+                    trafico_data=_trafico_diag, mercado_data=_mercado_diag,
+                    forecast_data=_forecast_diag, roi_data=_roi_diag,
+                    ticket_data=_ticket_diag,
+                )
 
-            with tab_comp:
-                st.caption("Competidores coloreados por rating en tu radio de 500m")
-                try:
-                    tipo_nombre_m = TIPOS_NEGOCIO.get(_tipo_mapas, {}).get('nombre','') if _tipo_mapas else ''
-                    mapa_c, interp_c = crear_mapa_competidores(
-                        lat, lng, _comp_mapas, tipo_nombre_m, idioma)
-                    render_mapa_con_interpretacion(mapa_c, interp_c, altura=420)
-                except Exception as e_mc:
-                    st.error(f"Error en mapa de competidores: {e_mc}")
+            # Renderizar con estilo destacado
+            import re as _re
+            def md_to_html(txt):
+                # Convierte **texto** a <b>texto</b> y saltos de línea a <br>
+                txt = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', txt)
+                txt = txt.replace('\n', '<br>')
+                return txt
 
-            with tab_heat:
-                st.caption("Densidad de competencia ponderada por rating y número de reseñas")
-                try:
-                    mapa_h, interp_h = crear_heatmap_competencia(lat, lng, _comp_mapas, idioma)
-                    render_mapa_con_interpretacion(mapa_h, interp_h, altura=420)
-                except Exception as e_mh:
-                    st.error(f"Error en heatmap: {e_mh}")
-
-            with tab_iso:
-                perfil_iso = st.radio("Modo de desplazamiento:",
-                    ["foot-walking", "driving-car"],
-                    format_func=lambda x: "🚶 A pie" if x == "foot-walking" else "🚗 En auto",
-                    horizontal=True, key="radio_iso")
-                if not ORS_API_KEY:
-                    st.info("💡 Mostrando isócronas estimadas por distancia. Para isócronas reales "
-                            "por red vial agrega `ORS_API_KEY` a tu `.env` (gratis en openrouteservice.org).")
-                try:
-                    mapa_iso, interp_iso = crear_mapa_isocronas(
-                        lat, lng, ORS_API_KEY, [5, 10, 15], perfil_iso, _comp_mapas, idioma)
-                    render_mapa_con_interpretacion(mapa_iso, interp_iso, altura=420)
-                except Exception as e_iso:
-                    st.error(f"Error en isócronas: {e_iso}")
-
-            with tab_cani:
-                st.caption("Identifica competidores que comparten tu área de influencia inmediata")
-                try:
-                    mapa_cani, interp_cani, datos_cani = crear_mapa_canibalizacion(
-                        lat, lng, _comp_mapas, 500, idioma)
-                    render_mapa_con_interpretacion(mapa_cani, interp_cani, altura=400)
-                    if datos_cani["muy_cercanos"]:
-                        st.markdown("**⚠️ Competidores críticos (≤150m) — riesgo alto de canibalización:**")
-                        crit_data = [{
-                            "Nombre": c.get('displayName',{}).get('text','N/A')[:25],
-                            "Distancia": f"{c.get('_distancia_m',0)}m",
-                            "Rating": c.get('rating','N/A'),
-                            "Reseñas": c.get('userRatingCount',0)
-                        } for c in datos_cani["muy_cercanos"]]
-                        st.dataframe(crit_data, use_container_width=True)
-                    elif not datos_cani["muy_cercanos"] and not datos_cani["cercanos"]:
-                        st.success("✅ Sin riesgo de canibalización — no hay competidores directos en los primeros 300m")
-                except Exception as e_cani:
-                    st.error(f"Error en mapa de canibalización: {e_cani}")
-            with tab_vial:
-                st.caption("Vialidades cercanas clasificadas por nivel de flujo vehicular")
-                st.info("🛣️ Clasifica las calles del entorno en primarias, comerciales y locales. Útil para evaluar visibilidad y tráfico de paso.")
-                try:
-                    mapa_vial, interp_vial = crear_mapa_vialidades(lat, lng, GOOGLE_API_KEY, _comp_mapas, idioma)
-                    render_mapa_con_interpretacion(mapa_vial, interp_vial, altura=440, titulo="🛣️ Vialidades y movilidad del entorno")
-                except Exception as e_vial:
-                    st.error(f"Error en mapa de vialidades: {e_vial}")
-
-        elif not MAPAS_OK:
-            st.warning("Instala `streamlit-folium` para ver mapas avanzados: `pip install streamlit-folium folium`")
-
-    # ── COMPARATIVA (PREMIUM en modo validar/recomendar, NO zona_potencial) ──
-    if tier_key == "premium" and modo in ["validar", "recomendar"]:
-        st.markdown("---")
-        st.markdown("### 🗺️ Comparativa de Ubicaciones")
-        st.caption("Analiza hasta 3 ubicaciones en paralelo y encuentra la mejor opción.")
-
-        if "ubicaciones_comparativa" not in st.session_state:
-            st.session_state.ubicaciones_comparativa = []
-
-        _key_comp2 = "exp_comp2_open"
-        if _key_comp2 not in st.session_state: st.session_state[_key_comp2] = False
-        if st.button("+ Agregar ubicaciones para comparar" + (" ▲" if st.session_state[_key_comp2] else " ▼"), key="btn_comp2_exp", use_container_width=True):
-            st.session_state[_key_comp2] = not st.session_state[_key_comp2]
-        if st.session_state[_key_comp2]:
-            pass
-        if st.session_state.get(_key_comp2, False):
-            col_a, col_b = st.columns([3,1])
-            with col_a:
-                nueva_ub = st.text_input("Dirección adicional a comparar:",
-                    placeholder="Ej: Av. Reforma 222, CDMX", key="nueva_ub_input")
-            with col_b:
-                if st.button("Agregar", key="btn_agregar_ub"):
-                    if not nueva_ub:
-                        st.warning("Escribe una dirección primero")
-                    elif len(st.session_state.ubicaciones_comparativa) >= 2:
-                        st.warning("Máximo 2 ubicaciones adicionales (3 en total)")
-                    else:
-                        with st.spinner(f"Analizando {nueva_ub[:30]}..."):
-                            try:
-                                lat2, lng2 = geocodificar_direccion(nueva_ub)
-                                if not lat2 or not lng2:
-                                    st.error("No se pudo geocodificar la dirección")
-                                else:
-                                    # Tipo de negocio para comparar
-                                    tipo_comp = tipo_para_pro if 'tipo_para_pro' in dir() else tipo_negocio_seleccionado
-                                    dem2   = obtener_demografia(lat2, lng2, nueva_ub)
-                                    comps2 = buscar_competencia_por_tipo(lat2, lng2, tipo_comp) if tipo_comp else []
-                                    score2_b, desglose2 = calcular_score_competencia(comps2, tipo_comp) if (tipo_comp and comps2) else (0, {})
-                                    ctx2   = detectar_contexto_ubicacion(lat2, lng2, nueva_ub)
-                                    score2_c = ajustar_score_por_contexto(score2_b, tipo_comp, ctx2) if tipo_comp else score2_b
-                                    score2   = ajustar_score_por_demografia(score2_c, tipo_comp, dem2) if tipo_comp else score2_c
-                                    st.session_state.ubicaciones_comparativa.append({
-                                        "nombre": nueva_ub[:25],
-                                        "score": score2,
-                                        "densidad_comp": desglose2.get("densidad", 0),
-                                        "calidad_comp":  desglose2.get("calidad", 0),
-                                        "consolidacion": desglose2.get("consolidacion", 0),
-                                        "poblacion":     dem2.get("poblacion_actual", dem2.get("poblacion_estimada", 0)),
-                                        "nse":           dem2.get("nse_predominante", "C"),
-                                        "ingreso":       dem2.get("ingreso_actual", dem2.get("ingreso_promedio_mensual", 0)),
-                                        "num_competidores": len(comps2),
-                                    })
-                                    st.success(f"✅ Agregada: {nueva_ub[:30]} — Score: {score2}/100")
-                                    st.rerun()
-                            except Exception as e_comp:
-                                st.error(f"Error al analizar: {e_comp}")
-
-        # Mostrar comparativa si hay ubicaciones
-        # Fix: desglose puede ser dict, lista de tuplas, o None
-        def _get_desglose_val(dsg, key, default=0):
-            if isinstance(dsg, dict): return dsg.get(key, default)
-            if isinstance(dsg, (list, tuple)):
-                for item in dsg:
-                    if isinstance(item, (list,tuple)) and len(item)>=2:
-                        if str(item[0]).lower() == key: return item[1]
-            return default
-
-        todas_ubs = [{
-            "nombre": ubicacion[:25],
-            "score": float(score),
-            "densidad_comp": _get_desglose_val(desglose, "densidad"),
-            "calidad_comp":  _get_desglose_val(desglose, "calidad"),
-            "consolidacion": _get_desglose_val(desglose, "consolidacion"),
-            "poblacion": (demografia or {}).get("poblacion_actual",
-                          (demografia or {}).get("poblacion_estimada",0)),
-            "nse":    (demografia or {}).get("nse_predominante","C"),
-            "ingreso":(demografia or {}).get("ingreso_actual",
-                       (demografia or {}).get("ingreso_promedio_mensual",0)),
-            "num_competidores": len(competidores or []),
-        }] + st.session_state.ubicaciones_comparativa
-
-        if len(todas_ubs) > 1 and GRAFICAS_OK:
-            try:
-                graf_comp = grafica_comparativa(todas_ubs)
-                if graf_comp:
-                    st.image(graf_comp, use_container_width=True,
-                             caption="Análisis comparativo — radar y barras por ubicación")
-            except Exception as e_graf:
-                st.caption(f"Gráfica comparativa no disponible: {e_graf}")
-
-            # Tabla resumen
-            comp_table_data = []
-            for ub in todas_ubs:
-                nivel_c, _ = nivel_score(ub['score'], idioma)
-                comp_table_data.append({
-                    "Ubicación": ub['nombre'],
-                    "Score": f"{ub['score']}/100",
-                    "Nivel": nivel_c,
-                    "Competidores": ub['num_competidores'],
-                    "NSE": ub['nse'],
-                    "Ingreso prom": f"${ub['ingreso']:,}",
-                })
-            st.dataframe(comp_table_data, use_container_width=True)
-
-            # Recomendación automática
-            mejor = max(todas_ubs, key=lambda x: x['score'])
-            st.success(f"✅ **Recomendación:** La mejor ubicación es **{mejor['nombre']}** con score {mejor['score']}/100")
-
-        if st.button("🗑️ Limpiar comparativa", key="btn_limpiar"):
-            st.session_state.ubicaciones_comparativa = []
-            st.rerun()
-
-    st.markdown("---")
-
-    # ── DIAGNÓSTICO COMERCIAL AL FINAL (Basic, PRO, PREMIUM) ──────
-    if tier_key != "free":
-        st.markdown("### ✅ Recomendación Final")
-
-        _trafico_diag = _mercado_diag = _forecast_diag = _roi_diag = None
-        if tier_key in ["pro", "premium"] and MODULOS_OK:
-            _tipo_diag = tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado
-            if _tipo_diag:
-                try:
-                    _tz  = contexto.get("tipo_zona", "mixto")
-                    _den = demografia.get("densidad_actual", demografia.get("densidad_hab_km2", 8000))
-                    _trafico_diag  = generar_reporte_trafico(_tz, _tipo_diag, _den)
-                    _mercado_diag  = calcular_mercado_potencial(demografia, _tipo_diag, len(competidores), competidores)
-                    _tipo_info_d   = TIPOS_NEGOCIO.get(_tipo_diag, {})
-                    _forecast_diag = generar_forecast(_mercado_diag, _tipo_diag, score,
-                                                       _tipo_info_d.get("inversion_min", 300000))
-                    _roi_diag      = calcular_roi(_forecast_diag,
-                                                   _tipo_info_d.get("inversion_min", 300000),
-                                                   _tipo_info_d.get("inversion_max", 600000), _tipo_diag)
-                except:
-                    pass
-
-        with st.spinner("🏆 Generando Recomendación Final..."):
-            # Calcular ticket_data para la recomendación final
-            _ticket_diag = None
-            if MODULOS_OK and competidores:
-                try:
-                    _tipo_t = tipo_para_pro if 'tipo_para_pro' in dir() and tipo_para_pro else tipo_negocio_seleccionado
-                    if _tipo_t:
-                        _ticket_diag = calcular_ticket_competencia(competidores, _tipo_t, score)
-                except Exception:
-                    pass
-
-            diagnostico = generar_recomendacion_final(
-                ubicacion=ubicacion, score=score, desglose=desglose,
-                competidores=competidores, demografia=demografia,
-                contexto=contexto, idioma=idioma, tier_key=tier_key, modo=modo,
-                tipo_negocio=tipo_negocio_seleccionado if modo == "validar" else None,
-                recomendaciones=recomendaciones,
-                trafico_data=_trafico_diag, mercado_data=_mercado_diag,
-                forecast_data=_forecast_diag, roi_data=_roi_diag,
-                ticket_data=_ticket_diag,
-            )
-
-        # Renderizar con estilo destacado
-        import re as _re
-        def md_to_html(txt):
-            # Convierte **texto** a <b>texto</b> y saltos de línea a <br>
-            txt = _re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', txt)
-            txt = txt.replace('\n', '<br>')
-            return txt
-
-        st.session_state["_diagnostico_pptx"] = diagnostico
-        st.markdown(f"""
+            st.session_state["_diagnostico_pptx"] = diagnostico
+            st.markdown(f"""
         <div style='background:linear-gradient(135deg,#13243B08 0%,#2A6FDB15 100%);
              border:2px solid #13243B55; border-radius:12px;
              padding:22px 26px; margin:10px 0;'>
         {md_to_html(diagnostico)}
         </div>""", unsafe_allow_html=True)
 
-        # Mensaje de apoyo — siempre presente
-        st.markdown("""
+            # Mensaje de apoyo — siempre presente
+            st.markdown("""
         <div style='background:#FFFFFF; border:1px solid #E3E8EF; border-radius:12px; padding:18px 22px;
              color:#13243B; margin-top:12px;'>
         <p style='font-size:12px; font-weight:700; color:#2A6FDB; margin:0 0 10px;'>
@@ -7117,7 +8032,7 @@ if "resultados" in st.session_state:
         </div>
         </div>""", unsafe_allow_html=True)
 
-        st.markdown("---")
+            st.markdown("---")
 
     # ── DESCARGA REPORTE (PowerPoint) ──
     st.markdown("---")
@@ -7169,6 +8084,25 @@ if "resultados" in st.session_state:
         pass
 
     st.markdown("#### 📊 Descargar Reporte")
+
+    # ── Dashboard interactivo descargable (Básico+) ──
+    if DASHBOARD_OK and tier_key != "free" and st.session_state.get("_dash_cache"):
+        try:
+            from dashboard_4site import construir_html_dashboard as _html_dash
+            _dd = st.session_state["_dash_cache"]["data"]
+            _html_file = _html_dash(_datos_para_navegador(_dd)).replace(
+                "height:100vh", "height:100vh;min-height:980px")
+            _dir_h = ubicacion[:25].replace(" ", "_").replace(",", "").replace(".", "")
+            st.download_button(
+                "🗺️  Descargar dashboard interactivo (.html)",
+                data=_html_file.encode("utf-8"),
+                file_name=f"4site_dashboard_{_dir_h}.html",
+                mime="text/html", use_container_width=True, key="btn_descarga_dash_html",
+            )
+            st.caption("Se abre en cualquier navegador (con internet para el mapa base): mapa con capas, "
+                       "KPIs, tráfico, veredicto e interpretación completa. Ideal para compartir por WhatsApp o correo.")
+        except Exception as _e_html:
+            st.caption(f"Dashboard descargable no disponible: {_e_html}")
 
     STRIPE_BASICO  = "https://buy.stripe.com/4gM28r66M5sD3Gqfmk5Rm02"
     STRIPE_PRO     = "https://buy.stripe.com/9B6eVdcvadZ990K7TS5Rm04"
