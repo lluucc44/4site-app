@@ -95,6 +95,13 @@ html, body, .stApp { color-scheme: light only !important; }
 html, body, [class*="css"], .stApp, .stMarkdown, p, span, div, label, input, select, textarea, button {
     font-family: 'Montserrat', sans-serif !important;
 }
+/* Íconos de Streamlit: la regla anterior les quitaba su fuente y salía texto como "smart_toy"
+   o "keyboard_arrow_down". Se les devuelve la fuente de íconos. */
+[data-testid="stIconMaterial"], span[class*="material-symbols"], .material-symbols-rounded,
+[data-testid="stExpanderToggleIcon"], [data-testid="stChatMessageAvatarAssistant"] span,
+[data-testid="stChatMessageAvatarUser"] span {
+    font-family: 'Material Symbols Rounded' !important;
+}
 
 /* Fondo principal — blanco limpio como en redes 4SITE */
 .stApp { background-color: #FFFFFF !important; }
@@ -684,7 +691,14 @@ def validar_codigo(codigo_ingresado):
     if not es_test and codigo_agotado(codigo):
         return "agotado"
 
-    # Códigos de prueba hardcodeados como fallback
+    # Códigos de prueba: solo funcionan donde el secret PERMITIR_CODIGOS_TEST = true
+    # (app de prueba). En producción quedan apagados porque el repo es público.
+    try:
+        _test_ok = bool(st.secrets.get("PERMITIR_CODIGOS_TEST", False))
+    except Exception:
+        _test_ok = os.getenv("PERMITIR_CODIGOS_TEST", "").lower() in ("1", "true", "si", "sí")
+    if es_test and not _test_ok:
+        return None
     if codigo == "BASIC-TEST":
         return "basic"
     if codigo == "PRO-TEST":
@@ -767,7 +781,9 @@ TYPE_MAPPING = {
     "cafe_premium":       ["cafe", "restaurant"],
     "cafe_casual":        ["cafe", "restaurant"],
     "restaurante_casual": ["restaurant", "meal_delivery", "meal_takeaway"],
-    "restaurante_fino":   ["restaurant"],
+    # Antes era "restaurant": contaba cualquier taquería como competencia del gourmet
+    # y todas las zonas salían saturadas. Google tiene tipos específicos de alta cocina.
+    "restaurante_fino":   ["fine_dining_restaurant", "steak_house"],
     "comida_rapida":      ["restaurant", "meal_takeaway"],
     "gimnasio_boutique":  ["gym"],
     "gimnasio_regular":   ["gym", "sports_complex"],
@@ -1593,6 +1609,14 @@ def buscar_competencia_por_tipo(lat, lng, tipo_key, radio=None, tipo_plaza=None)
                 _tiene_kw_cafe  = any(kw.lower() in nombre for kw in keywords)
                 _es_tipo_cafe   = any(t in ["cafe", "coffee_shop", "bakery"] for t in tipos)
                 if (_tiene_kw_cafe or _es_tipo_cafe) and not _es_no_cafe:
+                    filtered.append(p)
+
+            elif tipo_key == "restaurante_fino":
+                # Alta cocina: tipo específico de Google, o restaurante con precio alto
+                _pl = p.get("priceLevel", "")
+                if (any(t in ("fine_dining_restaurant", "steak_house") for t in tipos)
+                        or _pl in ("PRICE_LEVEL_EXPENSIVE", "PRICE_LEVEL_VERY_EXPENSIVE")
+                        or any(k in nombre for k in ("gourmet", "fine dining", "bistro", "bistró"))):
                     filtered.append(p)
 
             elif any(kw.lower() in nombre for kw in keywords) or any(t in included_types for t in tipos):
@@ -3436,6 +3460,34 @@ CATEGORIA_LABEL = {
 }
 
 
+def _nombre_legible_zona(geo, dem):
+    """Nombre de zona que una persona reconozca. Google a veces devuelve sectores numéricos
+    ("016") como colonia; esos se descartan y se usa la calle principal."""
+    def _valido(n):
+        return bool(n) and bool(re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{3,}", n)) and not re.fullmatch(r"[\d\s\-#.,]+", n)
+    colonia = ruta = ""
+    for prio in (("sublocality_level_1",), ("sublocality",), ("neighborhood",)):
+        for res in (geo or []):
+            for comp in res.get("address_components", []):
+                if any(t in comp.get("types", []) for t in prio) and _valido(comp.get("long_name")):
+                    colonia = comp["long_name"]; break
+            if colonia: break
+        if colonia: break
+    if not colonia and _valido((dem or {}).get("colonia")):
+        colonia = dem["colonia"]
+    for res in (geo or [])[:3]:
+        for comp in res.get("address_components", []):
+            if "route" in comp.get("types", []) and _valido(comp.get("long_name")):
+                ruta = comp["long_name"]; break
+        if ruta: break
+    mun = (dem or {}).get("municipio") or ""
+    if colonia:
+        return f"Col. {colonia}" if not colonia.lower().startswith(("col", "fracc", "barrio", "unidad", "u.h", "residencial")) else colonia, colonia, ruta, mun
+    if ruta:
+        return f"Sobre {ruta}", "", ruta, mun
+    return "", "", "", mun
+
+
 def _vial_desde_geocode(geo, tipo_key):
     """Clasifica la vialidad con el mismo reverse geocode (sin llamadas extra)."""
     ruta = ""
@@ -3534,17 +3586,16 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
         d_ctx = ajustar_score_por_contexto(50, tipo_key, ctx) - 50
         d_dem = (ajustar_score_por_demografia(50, tipo_key, dem) - 50) if dem else 0
         c["indice"] = c["indice"] + d_ctx + d_dem
-        colonia = dem.get("colonia") or ""
-        if not colonia and geo:
-            for comp in geo[0].get("address_components", []):
-                if any(t in comp.get("types", []) for t in ("sublocality_level_1", "sublocality", "neighborhood")):
-                    colonia = comp["long_name"]; break
-        mun = dem.get("municipio") or ""
+        nombre, colonia, ruta, mun = _nombre_legible_zona(geo, dem)
+        rumbo_txt = {"N": "al norte", "NE": "al noreste", "E": "al este", "SE": "al sureste",
+                     "S": "al sur", "SO": "al suroeste", "O": "al oeste", "NO": "al noroeste"}.get(c["rumbo"], "")
+        if not nombre:
+            nombre = f"Zona a {c['dist_km']} km {rumbo_txt}".strip() if c["rumbo"] else "Zona centro (tu referencia)"
         c.update({
             "detallada": True, "score": int(s_fin),
             "aj_vial": d_ctx, "aj_demo": d_dem,
             "vial": av, "colonia": colonia, "municipio": mun,
-            "nombre": ", ".join([x for x in (colonia, mun) if x]) or f"{c['lat']:.4f}, {c['lng']:.4f}",
+            "nombre": nombre, "ruta": ruta, "rumbo_txt": rumbo_txt,
             "nse": dem.get("nse_predominante", "—"),
             "ingreso": dem.get("ingreso_actual", 0),
             "densidad": dem.get("densidad_actual", 0),
@@ -3560,8 +3611,9 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
     from collections import Counter
     _rep = Counter(z["nombre"] for z in zonas)
     for z in zonas:
-        if _rep[z["nombre"]] > 1 or not z.get("colonia"):
-            z["nombre"] = f"{z['nombre']} · {z['dist_km']} km {z['rumbo']}".strip() if z["rumbo"] else f"{z['nombre']} · centro"
+        if _rep[z["nombre"]] > 1 and not z["nombre"].startswith("Zona a"):
+            z["nombre"] = (f"{z['nombre']} ({z['dist_km']} km {z['rumbo_txt']})" if z["rumbo"]
+                           else f"{z['nombre']} (centro)")
     for i, z in enumerate(zonas):
         z["rank"] = i + 1
         z["por_que"] = _por_que_zona(z, tipo_key, optimo)
@@ -6377,11 +6429,13 @@ except Exception:
 
 def _validar_zona_cb(z, tipo_key, tier_key):
     """Botón 'Validar esta zona': cambia a modo validar con el giro y corre el análisis en ese punto."""
-    st.session_state[f"modo_sel_{tier_key}"] = "validar"
+    st.session_state["modo_actual"] = "validar"
     st.session_state["tipo_validar"] = tipo_key
-    st.session_state["_coords_forzadas"] = (z["lat"], z["lng"], z["nombre"])
+    _dir = ", ".join(x for x in (z["nombre"], z.get("municipio")) if x)
+    st.session_state["_coords_forzadas"] = (z["lat"], z["lng"], _dir)
     st.session_state["_auto_analizar"] = True
-    st.session_state.pop("resultados", None)
+    for _k in ("resultados", "_dash_cache"):
+        st.session_state.pop(_k, None)
 
 
 def _parsear_agente_zona(txt):
@@ -6395,159 +6449,827 @@ def _parsear_agente_zona(txt):
     return out
 
 
-def render_modo_zona(tier_key, idioma):
+def _nombre_giro(tipo_key):
+    return re.sub(r"^[^\wÁÉÍÓÚÑáéíóúñ]+", "", TIPOS_NEGOCIO.get(tipo_key, {}).get("nombre", "")).strip()
+
+
+# ── Frase libre y ejemplos (pantalla de inicio) ───────────────────
+_EJEMPLOS = {
+    "sitio": [("Cafetería en Av. Tecnológico, Metepec",
+               {"modo": "validar", "giro": "cafe_premium", "direccion": "Av. Tecnológico 100, Metepec, Méx."}),
+              ("Farmacia en Insurgentes Sur, CDMX",
+               {"modo": "validar", "giro": "farmacia", "direccion": "Av. Insurgentes Sur 1458, Benito Juárez, CDMX"})],
+    "zona":  [("Cafetería cerca de Metepec centro",
+               {"modo": "zona_potencial", "giro": "cafe_premium", "direccion": "Metepec centro, Méx.", "radio_km": 3}),
+              ("Farmacia en Querétaro centro",
+               {"modo": "zona_potencial", "giro": "farmacia", "direccion": "Centro, Querétaro, Qro.", "radio_km": 3})],
+}
+
+
+def _procesar_frase(frase):
+    modos_ok = _MODOS_TIER.get(st.session_state.tier_activo, ["validar"])
+    with st.spinner("Entendiendo lo que buscas…"):
+        it = interpretar_intencion(claude, frase, TIPOS_NEGOCIO, modos_ok)
+    resp = None
+    if it["modo"] == "ninguno":
+        resp = it.get("falta") or ("Puedo validar una dirección para tu giro, decirte qué negocio conviene en una "
+                                   "dirección o buscar en qué zona abrir. ¿Qué te gustaría hacer?")
+    elif not it["permitido"]:
+        resp = (f"Para eso uso **{_MODO_LABEL[it['modo']][1]}**, que está disponible desde el plan "
+                f"{_PLAN_MODO.get(it['modo'], 'Básico')}. Con tu plan actual puedo validar una dirección para tu giro.")
+    elif it["modo"] in ("validar", "zona_potencial") and not it.get("giro"):
+        resp = "¿Qué tipo de negocio quieres abrir? Por ejemplo: cafetería, farmacia o gimnasio."
+    elif not it.get("direccion"):
+        resp = ("¿En qué dirección? Escribe calle, número y colonia." if it["modo"] != "zona_potencial"
+                else "¿Cerca de qué zona o ciudad busco?")
+    st.session_state["_nl_ultimo"] = (frase, resp or "Va, lo analizo.")
+    if resp is None:
+        st.session_state["_intent_aplicar"] = it
+        st.rerun()
+
+
+def _frases_ejemplo(grupo="sitio"):
+    st.markdown("<p style='font-size:12.5px;color:#5D6B7C;margin:12px 0 2px'>Prueba con un ejemplo</p>",
+                unsafe_allow_html=True)
+    for i, (txt, intent) in enumerate(_EJEMPLOS[grupo]):
+        if intent["modo"] not in _MODOS_TIER.get(st.session_state.tier_activo, ["validar"]):
+            continue
+        with st.container(key=f"chip_ej_{grupo}_{i}"):
+            st.button(txt, key=f"ej_{grupo}_{i}", on_click=_ejemplo, args=(intent,))
+    _ult = st.session_state.get("_nl_ultimo")
+    if _ult:
+        with st.chat_message("user", avatar=AVATAR_USUARIO):
+            st.markdown(_ult[0])
+        with st.chat_message("assistant", avatar=AVATAR_AGENTE):
+            st.markdown(_ult[1])
+    _frase = st.chat_input("O escríbeme lo que buscas…", key=f"chat_inicio_{grupo}")
+    if _frase:
+        _procesar_frase(_frase)
+
+
+# ── Resultados de validar / descubrir: conversación del agente ────
+def render_conversacion_sitio(data, r, tier_key, idioma):
+    if r.get("modo") == "recomendar":
+        pregunta = f"¿Qué negocio conviene en {r['ubicacion']}?"
+    else:
+        pregunta = f"{data.get('tipo_nombre') or 'Mi negocio'} en {r['ubicacion']}"
+    st.markdown(bloque_usuario(pregunta), unsafe_allow_html=True)
+    L_ = data.get("locks", {})
+    pasos = [
+        ("Ubiqué la dirección", True),
+        (f"{data.get('n_competidores', 0)}{'+' if data.get('n_competidores', 0) >= 20 else ''} competidores en "
+         f"{data.get('radio_m', 500):,} m (Google)", True),
+        ("Tipo de calle y acceso", bool(data.get("vial"))),
+        ("Perfil INEGI y nivel socioeconómico", not L_.get("demografia")),
+        ("Tráfico por hora y día", not L_.get("trafico")),
+        ("Mercado, ventas y retorno", not L_.get("forecast")),
+        ("Recomendación final", not L_.get("diag_parcial")),
+    ]
+    if r.get("modo") == "recomendar":
+        pasos.insert(1, (f"Comparé {len(r.get('recomendaciones') or [])} giros en este punto", True))
+    st.markdown(bloque_ruta(pasos), unsafe_allow_html=True)
+    st.markdown(bloque_veredicto(data), unsafe_allow_html=True)
+    render_chat(claude, data, tier_key, idioma)
+    _b1, _b2 = st.columns(2)
+    _b1.button("↺ Nuevo análisis", on_click=_nuevo_analisis, use_container_width=True, key="btn_nuevo")
+    _b2.markdown("<a href='#analisis-completo' target='_self' style='display:block;text-align:center;padding:7px;"
+                 "border:1px solid #E2E7EE;border-radius:8px;font-size:13.5px;color:#13243B;text-decoration:none'>"
+                 "Ver todo y descargar ↓</a>", unsafe_allow_html=True)
+    st.markdown("<p class='ag-note'>El agente puede equivocarse. Verifica en campo antes de firmar.</p>",
+                unsafe_allow_html=True)
+
+
+# ── Descubrir zona: formulario (inicio) ───────────────────────────
+def zona_formulario(agent, mapc, tier_key, idioma):
     es_premium = tier_key in ("premium", "premium2")
     radios = [1, 2, 3, 5] if es_premium else [1, 2, 3]
     n_det = 6 if es_premium else 4
-
-    st.markdown("### 🔍 Descubrir zona con potencial")
-    st.caption("Elige un giro y un punto de referencia. Barremos el radio en 19 zonas hexagonales, "
-               "evaluamos la competencia en cada una y detallamos las mejores con demografía y vialidad.")
-    c1, c2, c3 = st.columns([2.2, 1.7, 1.2])
-    with c1:
-        dir_ref = st.text_input("📍 Punto de referencia", key="zona_ref",
-                                placeholder="Ej: Metepec centro, o tu colonia de interés")
-    with c2:
-        tipo_z = st.selectbox("Giro", list(TIPOS_NEGOCIO.keys()),
+    with agent:
+        tipo_z = st.selectbox("Tu giro", list(TIPOS_NEGOCIO.keys()),
                               format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"], key="zona_tipo")
-    with c3:
-        radio_km = st.select_slider("Radio", options=radios, value=3, format_func=lambda x: f"{x} km",
-                                    key=f"zona_radio_{tier_key}")
-    hex_m = int(radio_km / 2.5 / math.sqrt(3) * 1000)
-    st.caption(f"Hexágonos de ~{hex_m*2:,} m · se detallan las {n_det} mejores · ~{19 + n_det + 1} consultas a Google · 15–30 seg"
-               + ("" if es_premium else " · 🔒 Radio de 5 km y 6 zonas detalladas en Premium"))
+        dir_ref = st.text_input("¿Cerca de dónde buscas?", key="zona_ref",
+                                placeholder="Colonia, zona o ciudad · o toca el mapa")
+        if f"zona_radio_{tier_key}" not in st.session_state:
+            st.session_state[f"zona_radio_{tier_key}"] = 3
+        radio_km = st.select_slider("Qué tan lejos buscar", options=radios, key=f"zona_radio_{tier_key}",
+                                    format_func=lambda x: f"{x} km a la redonda")
+        st.caption(f"Reviso 19 zonas y detallo las {n_det} mejores. Tarda de 15 a 30 segundos."
+                   + ("" if es_premium else " Con Premium: hasta 5 km y 6 zonas detalladas."))
 
-    if st.button("🗺️ Buscar zonas con potencial", type="primary", use_container_width=True, key="btn_zona"):
-        if not dir_ref.strip():
-            st.warning("Escribe un punto de referencia.")
-        else:
+    with mapc:
+        lat_c = lng_c = None
+        try:
+            import folium
+            from streamlit_folium import st_folium
+            m = folium.Map(location=[19.432608, -99.133209], zoom_start=11, tiles="OpenStreetMap")
+            if not st.session_state.get("mapa_zona_click"):
+                st.markdown(bloque_maphint("Escribe una zona o toca el mapa",
+                                           "Busco en qué parte de esa zona conviene más abrir tu giro."),
+                            unsafe_allow_html=True)
+            md = st_folium(m, use_container_width=True, height=860, key="mapa_zona_click",
+                           returned_objects=["last_clicked"])
+            if md and md.get("last_clicked"):
+                lat_c, lng_c = md["last_clicked"]["lat"], md["last_clicked"]["lng"]
+        except ImportError:
+            pass
+
+    with agent:
+        if lat_c and not dir_ref.strip():
+            st.success(f"📍 Buscaré alrededor del punto que marcaste ({lat_c:.4f}, {lng_c:.4f}).")
+        _auto = st.session_state.pop("_auto_zona", False)
+        with st.container(key="btn_zona"):
+            _go = st.button("Buscar zonas con potencial", use_container_width=True)
+        _frases_ejemplo("zona")
+        if not (_go or _auto):
+            return
+        if dir_ref.strip():
             lat_r, lng_r = geocodificar_direccion(dir_ref)
-            if not lat_r:
-                st.error("No pude ubicar esa referencia. Prueba con colonia y municipio.")
-            else:
-                barra = st.progress(0.05, text="Armando la rejilla de zonas…")
-                try:
-                    res = buscar_zonas_hex(lat_r, lng_r, radio_km, tipo_z, n_detalle=n_det,
-                                           progress=lambda f, t: barra.progress(f, text=t))
-                    barra.progress(0.9, text="El agente está comparando las mejores zonas…")
-                    tipo_nom = TIPOS_NEGOCIO[tipo_z]["nombre"]
-                    agente_txt = resumen_agente_zonas(res["zonas"], tipo_nom, dir_ref, radio_km, idioma)
-                finally:
-                    barra.empty()
-                st.session_state["zona_res"] = {
-                    "res": res, "ref": dir_ref, "lat": lat_r, "lng": lng_r, "tipo": tipo_z,
-                    "radio_km": radio_km, "agente_txt": agente_txt,
-                    "id": hashlib.md5(f"{lat_r}{lng_r}{tipo_z}{radio_km}".encode()).hexdigest()[:10],
-                }
-                _meta_capi("ViewContent", content_name=f"zona:{dir_ref[:40]}")
+            ref_txt = dir_ref
+        elif lat_c:
+            lat_r, lng_r, ref_txt = lat_c, lng_c, geocodificar_inversa(lat_c, lng_c) or f"{lat_c:.4f}, {lng_c:.4f}"
+        else:
+            st.warning("Escribe una zona o toca el mapa para saber dónde buscar.")
+            return
+        if not lat_r:
+            st.error("No encontré esa zona. Prueba con colonia y municipio, por ejemplo: Centro, Toluca.")
+            return
+        barra = st.progress(0.05, text="Armando las zonas de búsqueda…")
+        try:
+            res = buscar_zonas_hex(lat_r, lng_r, radio_km, tipo_z, n_detalle=n_det,
+                                   progress=lambda f, tx: barra.progress(f, text=tx))
+            barra.progress(0.9, text="Comparando las mejores zonas…")
+            agente_txt = resumen_agente_zonas(res["zonas"], TIPOS_NEGOCIO[tipo_z]["nombre"], ref_txt, radio_km, idioma)
+        finally:
+            barra.empty()
+        st.session_state["zona_res"] = {
+            "res": res, "ref": ref_txt, "lat": lat_r, "lng": lng_r, "tipo": tipo_z,
+            "radio_km": radio_km, "agente_txt": agente_txt,
+            "id": hashlib.md5(f"{lat_r}{lng_r}{tipo_z}{radio_km}".encode()).hexdigest()[:10],
+        }
+        _meta_capi("ViewContent", content_name=f"zona:{ref_txt[:40]}")
+        st.rerun()
 
-    zr = st.session_state.get("zona_res")
-    if not zr:
-        return
+
+def _datos_zona(zr, tier_key):
     res = zr["res"]
-    tipo_nom = re.sub(r"^[^\wÁÉÍÓÚÑáéíóúñ]+", "", TIPOS_NEGOCIO[zr["tipo"]]["nombre"]).strip()
-    zonas = res["zonas"]
-    data = {
+    return {
         "id": "zona_" + zr["id"], "modo": "zona",
         "ubicacion": zr["ref"], "lat": zr["lat"], "lng": zr["lng"], "radio_km": zr["radio_km"],
-        "tipo_nombre": tipo_nom, "tier_nombre": TIERS[tier_key]["nombre"],
+        "tipo_nombre": _nombre_giro(zr["tipo"]), "tier_nombre": TIERS[tier_key]["nombre"],
         "celdas": [{k: c.get(k) for k in ("lat", "lng", "poly", "score", "categoria", "n_comp", "tope",
                                           "detallada", "nombre", "dist_km")} for c in res["celdas"]],
-        "zonas": zonas, "zonas_ocultas": 0 if es_premium else 0,
+        "zonas": res["zonas"], "zonas_ocultas": 0,
         "competidores": res["competidores"], "n_competidores": len(res["competidores"]),
         "hex_m": res["radio_busq_m"], "llamadas": res["llamadas"],
         "agente": _parsear_agente_zona(zr["agente_txt"]),
     }
 
-    st.markdown("""<style>.main .block-container,[data-testid="stMainBlockContainer"],.block-container{
-        max-width:1680px !important;padding-left:1.2rem !important;padding-right:1.2rem !important;}</style>""",
-                unsafe_allow_html=True)
-    col_a, col_d = st.columns([1.05, 3.5], gap="small")
-    with col_d:
-        if _render_dashboard_zona:
-            _render_dashboard_zona(data, height=1010)
-    with col_a:
-        if DASHBOARD_OK:
-            _render_panel_agente(claude, data, tier_key, idioma)
 
-    # ── Validar una zona con el análisis completo ──
-    if zonas:
-        st.markdown("#### ✅ Validar una zona con el análisis completo")
-        st.caption("Corre el análisis de ubicación (score, tráfico, mercado, forecast y recomendación) en el centro de la zona.")
-        cols = st.columns(min(len(zonas), 6))
-        for i, z in enumerate(zonas[:6]):
-            cols[i].button(f"#{i+1} · {z['score']} pts\n{z['nombre'][:28]}", key=f"val_zona_{i}",
-                           use_container_width=True, on_click=_validar_zona_cb, args=(z, zr["tipo"], tier_key))
-
-    # ── Descargas ──
-    st.markdown("#### 📥 Descargar")
-    d1, d2 = st.columns(2)
-    with d1:
-        try:
-            st.download_button("🗺️ Dashboard de zonas (.html)", data=_html_zona(data).encode("utf-8"),
-                               file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.html",
-                               mime="text/html", use_container_width=True, key="dl_zona_html")
-        except Exception as e:
-            st.caption(f"HTML no disponible: {e}")
-    with d2:
-        try:
-            filas = [{
-                "ranking_pos": z["rank"], "zona_categoria": z["categoria"], "direccion": z["nombre"],
-                "score": z["score"], "nse": z.get("nse", "—"), "densidad": int(z.get("densidad") or 0),
-                "n_competidores": z["n_comp"], "vialidad": (z.get("vial") or {}).get("badge", ""),
-                "mejor_competidor": (z.get("mejor") or {}).get("nombre", ""),
-                "mejor_rating": (z.get("mejor") or {}).get("rating", 0),
-                "mejor_reviews": (z.get("mejor") or {}).get("reviews", 0),
-                "recom_ubicacion": z.get("recom", {}),
-            } for z in zonas]
-            pptx_z = generar_pptx_zona_potencial(filas, zr["ref"], zr["radio_km"], tipo_nom, tier_key=tier_key)
-            if pptx_z:
-                st.download_button("⬇️ Reporte de zonas (PowerPoint)", data=pptx_z,
-                                   file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.pptx",
-                                   mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                   use_container_width=True, type="primary", key="dl_zona_pptx")
-        except Exception as e:
-            st.caption(f"PowerPoint no disponible: {e}")
+# ── Descubrir zona: resultados ────────────────────────────────────
+def zona_resultados(agent, mapc, tier_key, idioma):
+    zr = st.session_state["zona_res"]
+    data = _datos_zona(zr, tier_key)
+    zonas = data["zonas"]
+    with mapc:
+        render_mapa(html_mapa_zonas(data), 860)
+    with agent:
+        st.markdown(bloque_usuario(f"¿Dónde abro {data['tipo_nombre'].lower()} cerca de {zr['ref']}?"),
+                    unsafe_allow_html=True)
+        st.markdown(bloque_ruta([
+            (f"Ubiqué {zr['ref']}", True),
+            (f"Dividí {zr['radio_km']} km en {len(data['celdas'])} zonas", True),
+            (f"Encontré {data['n_competidores']} competidores (Google)", True),
+            (f"Detallé las {len(zonas)} mejores con INEGI y tipo de calle", True),
+            ("Comparé y elegí la mejor", True),
+        ]), unsafe_allow_html=True)
+        st.markdown(bloque_agente_zonas(data), unsafe_allow_html=True)
+        if zonas:
+            st.markdown("<p style='font-size:13px;font-weight:600;color:#13243B;margin:8px 0 4px'>"
+                        "Revisar una zona a fondo</p>", unsafe_allow_html=True)
+            for i, z in enumerate(zonas[:6]):
+                with st.container(key=f"chip_val_{i}"):
+                    st.button(f"{i+1}. {z['nombre'][:40]} · {z['score']}", key=f"val_zona_{i}",
+                              on_click=_validar_zona_cb, args=(z, zr["tipo"], tier_key))
+        render_chat(claude, data, tier_key, idioma)
+        with st.expander("📥 Descargar"):
+            try:
+                st.download_button("Mapa de zonas interactivo (.html)", data=_html_zona(data).encode("utf-8"),
+                                   file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.html",
+                                   mime="text/html", use_container_width=True, key="dl_zona_html")
+            except Exception as e:
+                st.caption(f"HTML no disponible: {e}")
+            try:
+                filas = [{
+                    "ranking_pos": z["rank"], "zona_categoria": z["categoria"], "direccion": z["nombre"],
+                    "score": z["score"], "nse": z.get("nse", "—"), "densidad": int(z.get("densidad") or 0),
+                    "n_competidores": z["n_comp"], "vialidad": (z.get("vial") or {}).get("badge", ""),
+                    "mejor_competidor": (z.get("mejor") or {}).get("nombre", ""),
+                    "mejor_rating": (z.get("mejor") or {}).get("rating", 0),
+                    "mejor_reviews": (z.get("mejor") or {}).get("reviews", 0),
+                    "recom_ubicacion": z.get("recom", {}),
+                } for z in zonas]
+                pptx_z = generar_pptx_zona_potencial(filas, zr["ref"], zr["radio_km"], data["tipo_nombre"], tier_key=tier_key)
+                if pptx_z:
+                    st.download_button("Reporte de zonas (PowerPoint)", data=pptx_z,
+                                       file_name=f"4site_zonas_{zr['ref'][:20].replace(' ', '_')}.pptx",
+                                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                       use_container_width=True, key="dl_zona_pptx")
+            except Exception as e:
+                st.caption(f"PowerPoint no disponible: {e}")
+        st.button("↺ Nueva búsqueda", on_click=_nuevo_analisis, use_container_width=True, key="btn_nuevo_zona")
+        st.markdown("<p class='ag-note'>El agente puede equivocarse. Visita las zonas antes de firmar.</p>",
+                    unsafe_allow_html=True)
 
 
 # ============================================
 # INTERFAZ STREAMLIT
 # ============================================
 
-# Selector idioma
-idioma = st.selectbox(
-    TEXTOS["es"]["selector_idioma"],
-    options=["es", "en"],
-    format_func=lambda x: "Español 🇲🇽" if x == "es" else "English 🇺🇸"
-)
+# ══════════════════════════════════════════════════════════════════
+# LAYOUT DE AGENTE: panel del agente a la izquierda, mapa a la derecha
+# ══════════════════════════════════════════════════════════════════
+from vista_agente import (css_shell, bloque_marca, bloque_saludo, bloque_usuario, bloque_ruta,
+                          bloque_veredicto, bloque_agente_zonas, bloque_maphint, render_mapa,
+                          html_mapa_sitio, html_mapa_zonas, interpretar_intencion, render_chat,
+                          AVATAR_AGENTE, AVATAR_USUARIO)
+st.markdown(css_shell(), unsafe_allow_html=True)
+
+if "tier_activo" not in st.session_state:
+    st.session_state.tier_activo = "free"
+idioma = st.session_state.get("idioma_sel", "es")
 t = TEXTOS[idioma]
 
-# Header con imagen de fondo
-import base64 as _b64, os as _os
-_img_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "hero_4site.jpg")
-_img_b64 = ""
-if _os.path.exists(_img_path):
-    with open(_img_path, "rb") as _f:
-        _img_b64 = _b64.b64encode(_f.read()).decode()
+_MODOS_TIER = {
+    "free":     ["validar"],
+    "basic":    ["validar", "recomendar"],
+    "pro":      ["validar", "recomendar", "zona_potencial"],
+    "premium":  ["validar", "recomendar", "zona_potencial"],
+    "premium2": ["validar", "recomendar", "zona_potencial"],
+}
+_MODO_LABEL = {
+    "validar":        ("✅", "Validar mi idea", "¿Funciona mi giro en esta dirección?"),
+    "recomendar":     ("🎯", "Descubrir negocio", "¿Qué giro conviene en esta dirección?"),
+    "zona_potencial": ("🗺️", "Descubrir zona", "¿En qué parte de la ciudad abro?"),
+}
+_PLAN_MODO = {"recomendar": "Básico", "zona_potencial": "PRO"}
 
-st.markdown(f"""
-<div class='hero-4site' style='position:relative; border-radius:16px; overflow:hidden; margin-bottom:16px; min-height:260px;'>
-    {'<img src="data:image/jpeg;base64,' + _img_b64 + '" style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; object-position:center;" />' if _img_b64 else ''}
-    <div style='position:absolute; top:0; left:0; width:100%; height:100%;
-         background:linear-gradient(180deg, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.65) 100%);'></div>
-    <div style='position:relative; z-index:2; text-align:center; padding:56px 20px 48px;'>
-        <p class='hero-tagline' style='font-size:16px; margin:0 0 10px; font-style:italic;
-             font-weight:700; font-family:Montserrat,sans-serif;'>Don't guess. Foresee.</p>
-        <p class='hero-sub' style='font-size:15px; margin:0 auto; max-width:460px; line-height:1.7;
-             text-shadow:0 1px 4px rgba(0,0,0,0.9);'>
-            Descubre si tu ubicación tiene potencial para tu negocio antes de invertir — en minutos.
-        </p>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# ── Intención pendiente (frase libre o ejemplo): se aplica ANTES de crear los widgets ──
+_intent = st.session_state.pop("_intent_aplicar", None)
+if _intent:
+    st.session_state["modo_actual"] = _intent["modo"]
+    if _intent.get("giro"):
+        st.session_state["tipo_validar"] = _intent["giro"]
+        st.session_state["zona_tipo"] = _intent["giro"]
+    if _intent.get("direccion"):
+        st.session_state["direccion_input"] = _intent["direccion"]
+        st.session_state["zona_ref"] = _intent["direccion"]
+    if _intent.get("radio_km"):
+        _rk = st.session_state.tier_activo
+        _opts = [1, 2, 3, 5] if _rk in ("premium", "premium2") else [1, 2, 3]
+        st.session_state[f"zona_radio_{_rk}"] = min(_opts, key=lambda x: abs(x - float(_intent["radio_km"])))
+    for _k in ("resultados", "zona_res", "_dash_cache"):
+        st.session_state.pop(_k, None)
+    st.session_state["_auto_zona" if _intent["modo"] == "zona_potencial" else "_auto_analizar"] = True
 
-# ── Ejemplo de resultado ──────────────────────
-st.markdown(
+with st.container(key="shell"):
+    _col_ag, _col_map = st.columns([1, 2.5], gap="small")
+with _col_ag:
+    _agent = st.container(key="agentpanel")
+with _col_map:
+    _mapc = st.container(key="mappanel")
+
+# ── Marca, código y plan ─────────────────────────────────────────
+with _agent:
+    _plan_txt = "" if st.session_state.tier_activo == "free" else f"Plan {TIERS[st.session_state.tier_activo]['nombre']}"
+    _marca = st.empty()
+    _c1, _c2 = st.columns([1.35, 1])
+    with _c1:
+        with st.popover("🔑 Tengo un código" if st.session_state.tier_activo == "free" else "🔑 Cambiar código",
+                        use_container_width=True):
+            codigo_input = st.text_input(t["validar_codigo"], placeholder=t["placeholder_codigo"], key="codigo_input")
+            aplicar = st.button(t["validar_codigo"], use_container_width=True, key="btn_aplicar_codigo")
+            if aplicar and codigo_input:
+                resultado = validar_codigo(codigo_input)
+                if resultado is None:
+                    st.error(t["codigo_invalido"])
+                elif resultado == "agotado":
+                    st.error("❌ Este código ya alcanzó el límite de 3 análisis. Adquiere un nuevo código en hola@4site.mx")
+                else:
+                    st.session_state.tier_activo = resultado
+                    st.session_state.codigo_activo = codigo_input.strip().upper()
+                    activar_codigo(codigo_input)
+                    tier_info = TIERS[resultado]
+                    _usos_rest = usos_restantes(codigo_input)
+                    _usos_txt = (f"· {_usos_rest} análisis restante{'s' if _usos_rest != 1 else ''}"
+                                 if not (codigo_input.strip().upper().endswith("-TEST") or codigo_input.strip().upper() == "TEST") else "")
+                    st.success(f"{t['codigo_valido']} **{tier_info['nombre']}** {_usos_txt}")
+                    _plan_txt = f"Plan {tier_info['nombre']}"
+    with _c2:
+        st.selectbox("Idioma", options=["es", "en"], key="idioma_sel", label_visibility="collapsed",
+                     format_func=lambda x: "🇲🇽 Español" if x == "es" else "🇺🇸 English")
+    _marca.markdown(bloque_marca(_plan_txt), unsafe_allow_html=True)
+
+tier_key   = st.session_state.tier_activo
+tier_info  = TIERS[tier_key]
+tier_color = tier_info["color"]
+_modos = _MODOS_TIER.get(tier_key, ["validar"])
+
+modo = st.session_state.get("modo_actual", "validar")
+if modo not in _modos:
+    modo = "validar"
+_vista = ("resultados" if (modo == "zona_potencial" and "zona_res" in st.session_state)
+          or (modo != "zona_potencial" and "resultados" in st.session_state) else "inicio")
+
+
+def _elegir_modo(m):
+    if m in _MODOS_TIER.get(st.session_state.tier_activo, ["validar"]):
+        st.session_state["modo_actual"] = m
+        st.session_state.pop("_aviso_plan", None)
+    else:
+        st.session_state["_aviso_plan"] = m
+
+
+def _nuevo_analisis():
+    for _k in ("resultados", "zona_res", "_dash_cache"):
+        st.session_state.pop(_k, None)
+
+
+def _ejemplo(intent):
+    st.session_state["_intent_aplicar"] = intent
+
+
+# ── Inicio: saludo, modos y frase libre ───────────────────────────
+if _vista == "inicio":
+    with _agent:
+        st.markdown(bloque_saludo("¿Dónde quieres abrir tu negocio?",
+                                  "Reviso la competencia, el tráfico y el perfil de la zona, y te digo si conviene antes de que firmes."),
+                    unsafe_allow_html=True)
+        for _m in ("validar", "recomendar", "zona_potencial"):
+            _ic, _tit, _preg = _MODO_LABEL[_m]
+            _lock = _m not in _modos
+            _key = f"modeon_{_m}" if _m == modo else (f"modelock_{_m}" if _lock else f"mode_{_m}")
+            _lbl = f"{_ic}  **{_tit}**{'  ·  🔒 ' + _PLAN_MODO[_m] if _lock else ''}\n{_preg}"
+            with st.container(key=_key):
+                st.button(_lbl, key=f"btn_{_key}", on_click=_elegir_modo, args=(_m,), use_container_width=True)
+        _av = st.session_state.get("_aviso_plan")
+        if _av:
+            st.info(f"**{_MODO_LABEL[_av][1]}** está disponible desde el plan {_PLAN_MODO[_av]}. "
+                    "Abajo puedes ver los planes, o si ya compraste, usa **Tengo un código**.")
+
+if modo == "zona_potencial":
+    if _vista == "resultados":
+        zona_resultados(_agent, _mapc, tier_key, idioma)
+    else:
+        zona_formulario(_agent, _mapc, tier_key, idioma)
+    st.stop()
+
+tipo_negocio_seleccionado = None
+if _vista == "inicio":
+    with _agent:
+        if modo == "validar":
+            tipo_negocio_seleccionado = st.selectbox("Tu giro", options=list(TIPOS_NEGOCIO.keys()), key="tipo_validar",
+                                                      format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"])
+
+if _vista == "inicio":
+    with _agent:
+        direccion_texto = st.text_input("Dirección del local", placeholder="Calle, número y colonia · o toca el mapa",
+                                        key="direccion_input")
+        with st.expander("⚙️ Ajustes del local (opcional)"):
+            # ── Detección automática de tipo de plaza ─────────────────────
+            _tipo_plaza_detectado = detectar_tipo_plaza(direccion_texto or "")
+            tipo_plaza = None  # se definirá abajo
+
+            # PRO y PREMIUM: selector siempre visible (con default inteligente de auto-detección)
+            if tier_key in ["pro", "premium", "premium2"]:
+
+                _default_plaza = {
+                    "mall":          "mall",
+                    "strip_center":  "strip_center",
+                    "plaza_ambigua": "strip_center",
+                }.get(_tipo_plaza_detectado, "calle")
+
+                if _tipo_plaza_detectado in ["mall", "strip_center", "plaza_ambigua"]:
+                    _det_labels = {
+                        "mall":          "🏬 Detectamos que tu dirección corresponde a un mall o plaza cerrada.",
+                        "strip_center":  "🏪 Detectamos que tu dirección corresponde a un strip center o plaza abierta.",
+                        "plaza_ambigua": "🏢 Detectamos que tu dirección puede estar dentro de una plaza — confirma el tipo.",
+                    }
+                    st.markdown(f"""<div style='background:#F5F7FA; border-left:4px solid #D98A1F;
+            border-radius:6px; padding:8px 14px; margin:2px 0 6px;'>
+            <span style='color:#D98A1F; font-size:12px;'>{_det_labels[_tipo_plaza_detectado]}
+            Confirma o ajusta abajo.</span></div>""", unsafe_allow_html=True)
+
+                st.markdown("**¿Esta ubicación está dentro de una plaza comercial?**")
+                _col_pz1, _col_pz2 = st.columns([3, 2])
+                with _col_pz1:
+                    _tipo_plaza_sel = st.radio(
+                        "",
+                        options=["calle", "strip_center", "mall"],
+                        format_func=lambda x: {
+                            "calle":        "🚶 No — está en calle, avenida o edificio normal",
+                            "strip_center": "🏪 Sí — Plaza abierta / Strip center (locales con cajones al frente)",
+                            "mall":         "🏬 Sí — Mall / Plaza cerrada (tipo Galerías, Antara, Perisur)",
+                        }.get(x, x),
+                        index=["calle", "strip_center", "mall"].index(_default_plaza),
+                        key="tipo_plaza_radio_pro",
+                        horizontal=False,
+                        label_visibility="collapsed",
+                    )
+                tipo_plaza = None if _tipo_plaza_sel == "calle" else _tipo_plaza_sel
+
+                with _col_pz2:
+                    if tipo_plaza == "mall":
+                        st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
+                <b style='color:#2A6FDB;'>Mall cerrado</b><br>
+                Amplía radio de competencia a 1km, aplica lógica de tráfico captivo
+                y ajusta ROI por renta elevada.</div>""", unsafe_allow_html=True)
+                    elif tipo_plaza == "strip_center":
+                        st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
+                <b style='color:#2A6FDB;'>Strip center / plaza abierta</b><br>
+                Visibilidad desde la calle, tráfico mixto paso + destino.
+                La tienda ancla tiene alto impacto.</div>""", unsafe_allow_html=True)
+                    else:
+                        st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
+                <b style='color:#13243B;'>Calle / avenida</b><br>
+                Análisis estándar: visibilidad de paso, vialidad y demografía del entorno.
+                </div>""", unsafe_allow_html=True)
+
+            else:
+                # FREE y BÁSICO: solo auto-detección
+                if _tipo_plaza_detectado == "mall":
+                    tipo_plaza = "mall"
+                    st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #2A6FDB;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#2A6FDB; font-weight:700;'>🏬 Mall / Plaza Cerrada detectado</span><br>
+            <span style='color:#5C6B7A; font-size:12px;'>
+            El análisis aplicará lógica especial para plazas cerradas.</span>
+            </div>""", unsafe_allow_html=True)
+                elif _tipo_plaza_detectado == "strip_center":
+                    tipo_plaza = "strip_center"
+                    st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #2A6FDB;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#2A6FDB; font-weight:700;'>🏪 Strip Center / Plaza Abierta detectada</span><br>
+            <span style='color:#5C6B7A; font-size:12px;'>
+            Análisis con lógica de plaza abierta.</span>
+            </div>""", unsafe_allow_html=True)
+                elif _tipo_plaza_detectado == "plaza_ambigua" and direccion_texto:
+                    st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #D98A1F;
+            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
+            <span style='color:#D98A1F; font-weight:700;'>🏢 ¿Qué tipo de plaza es?</span><br>
+            <span style='color:#5C6B7A; font-size:12px;'>
+            Detectamos que tu ubicación está dentro de una plaza.</span>
+            </div>""", unsafe_allow_html=True)
+                    tipo_plaza = st.radio(
+                        "",
+                        options=["strip_center", "mall", "no_plaza"],
+                        format_func=lambda x: {
+                            "strip_center": "🏪 Plaza abierta / Strip center",
+                            "mall":         "🏬 Mall / Plaza cerrada",
+                            "no_plaza":     "🚶 No es plaza — calle normal",
+                        }.get(x, x),
+                        key="tipo_plaza_radio",
+                        horizontal=False,
+                    )
+                    if tipo_plaza == "no_plaza":
+                        tipo_plaza = None
+
+            # ── Info adicional para MALL (todos los tiers) ──────────────────────────────
+            if tipo_plaza == "mall":
+                st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    zona_mall = st.selectbox(
+                        "📍 Zona dentro del mall:",
+                        options=["no_especificado","food_court","moda_accesorios","servicios",
+                                 "ancla_principal","planta_baja_entrada","piso_superior"],
+                        format_func=lambda x: {
+                            "no_especificado":    "No sé / no especificado",
+                            "food_court":         "🍽️ Food court / zona de comida",
+                            "moda_accesorios":    "👗 Moda / accesorios / lifestyle",
+                            "servicios":          "💈 Servicios (salud, belleza, etc.)",
+                            "ancla_principal":    "⚓ Cerca de ancla (Liverpool, Walmart, Cine)",
+                            "planta_baja_entrada":"🚪 Planta baja / entrada principal",
+                            "piso_superior":      "⬆️ Piso superior / menor tráfico",
+                        }.get(x, x),
+                        key="zona_mall_select",
+                    )
+                with col_m2:
+                    nivel_renta_mall = st.selectbox(
+                        "💰 Nivel de renta estimada:",
+                        options=["desconocido","bajo","medio","alto","muy_alto"],
+                        format_func=lambda x: {
+                            "desconocido": "No sé / no tengo dato",
+                            "bajo":        "💚 Baja — < $400/m² mes",
+                            "medio":       "🟡 Media — $400–$800/m² mes",
+                            "alto":        "🟠 Alta — $800–$1,500/m² mes",
+                            "muy_alto":    "🔴 Muy alta — > $1,500/m² mes",
+                        }.get(x, x),
+                        key="nivel_renta_mall",
+                    )
+                # zona_mall y nivel_renta_mall ya están en session_state via sus widget keys
+
+            elif tipo_plaza == "strip_center":
+                st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
+                _col_sc1, _col_sc2 = st.columns(2)
+                with _col_sc1:
+                    ancla_strip = st.selectbox(
+                        "⚓ ¿Hay una tienda ancla en la plaza?",
+                        options=["sin_ancla","walmart","chedraui","soriana","oxxo","farmacias","banco","otra"],
+                        format_func=lambda x: {
+                            "sin_ancla":  "Sin ancla identificable",
+                            "walmart":    "🛒 Walmart / Bodega Aurrerá / Sam's",
+                            "chedraui":   "🛒 Chedraui / Superama",
+                            "soriana":    "🛒 Soriana / Comercial Mexicana",
+                            "oxxo":       "🏪 OXXO / tienda de conveniencia",
+                            "farmacias":  "💊 Farmacia cadena (Similares, Benavides, etc.)",
+                            "banco":      "🏦 Banco / cajero",
+                            "otra":       "Otra tienda ancla",
+                        }.get(x, x),
+                        key="ancla_strip_select",
+                    )
+                with _col_sc2:
+                    _tips_ancla = {
+                        "walmart":   "🛒 Flujo familiar constante — ideal para comida rápida, farmacia y servicios.",
+                        "chedraui":  "🛒 NSE ligeramente más alto — funciona bien para café y papelería.",
+                        "soriana":   "🛒 Buen flujo de compra semanal, similar a Chedraui.",
+                        "oxxo":      "🏪 Muy alto tráfico de paso — ideal para comida y servicios rápidos.",
+                        "farmacias": "💊 Clientela recurrente y de confianza — excelente para salud y nutrición.",
+                        "banco":     "🏦 Genera cola de espera — clientes disponibles frente al local.",
+                        "sin_ancla": "Sin ancla: el tráfico depende 100% de visibilidad exterior.",
+                        "otra":      "Evalúa qué clientela atrae el ancla y si es compatible con tu negocio.",
+                    }
+                    if ancla_strip in _tips_ancla:
+                        st.markdown(f"""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
+                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A; margin-top:22px;'>
+                {_tips_ancla[ancla_strip]}</div>""", unsafe_allow_html=True)
+                # ancla_strip ya está en session_state via su widget key
+
+            # Guardar tipo_plaza en session_state para usarlo en el análisis
+            st.session_state["tipo_plaza"] = tipo_plaza
+
+            # ── RADIO DE ANÁLISIS ─────────────────────────────────────────────
+            _radio_default = radio_efectivo_analisis(None, tipo_plaza)
+            _radio_opciones = {"free": [500], "basic": [300, 500, 600, 800, 1000]}.get(
+                tier_key, [300, 500, 600, 800, 1000, 1500, 2000])
+            st.markdown("**📏 Radio de análisis de competencia**")
+            if len(_radio_opciones) == 1:
+                st.session_state["radio_analisis"] = None
+                st.caption(f"Radio fijo de {_radio_default} m · 🔒 Elegir radio (300–1,000 m) disponible desde plan Básico")
+            else:
+                if _radio_default not in _radio_opciones:
+                    _radio_default = 500
+                st.session_state["radio_analisis"] = st.select_slider(
+                    "Radio de análisis", options=_radio_opciones, value=_radio_default,
+                    format_func=lambda x: f"{x:,} m", key=f"radio_slider_{tier_key}", label_visibility="collapsed")
+                _r_sel = st.session_state["radio_analisis"]
+                _tip_radio = ("zona de influencia peatonal inmediata" if _r_sel <= 400 else
+                              "radio estándar de tienda de barrio / paso" if _r_sel <= 600 else
+                              "radio de negocio mixto o de destino" if _r_sel <= 1000 else
+                              "radio de destino (el cliente llega en auto)")
+                st.caption(f"{_r_sel:,} m — {_tip_radio}. El score se normaliza por área, así que un radio mayor no te castiga solo por abarcar más. "
+                           "Google devuelve máximo 20 competidores por búsqueda (los más cercanos).")
+
+            # ── FLUJO DE ACCESO Y ESTACIONAMIENTO ────────────────────────────────────────
+            st.markdown("**¿Cómo llegan principalmente los clientes a esta zona?**")
+            _col_flujo1, _col_flujo2 = st.columns([3, 2])
+            with _col_flujo1:
+                _tipo_flujo_sel = st.radio(
+                    "",
+                    options=["peatonal", "vehicular", "mixto"],
+                    format_func=lambda x: {
+                        "peatonal":  "🚶 Principalmente a pie — zona peatonal o mucho tránsito caminando",
+                        "vehicular": "🚗 Principalmente en auto — la mayoría llega en vehículo",
+                        "mixto":     "🚶🚗 Mixto — hay tanto peatones como autos",
+                    }.get(x, x),
+                    index=0,
+                    key="tipo_flujo_radio",
+                    horizontal=False,
+                    label_visibility="collapsed",
+                )
+
+            with _col_flujo2:
+                _tips_flujo = {
+                    "peatonal":  "La ubicación depende de la visibilidad y el paso constante de personas. Zonas como centros, mercados o corredores comerciales.",
+                    "vehicular": "El cliente llega con intención. Necesitas visibilidad desde la calle y acceso fácil para entrar y salir.",
+                    "mixto":     "Buen balance: la ubicación puede captar tanto clientes de paso como clientes que vienen a propósito.",
+                }
+                st.markdown(f"""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
+        border-radius:6px; padding:10px 14px; font-size:11px; color:#5C6B7A !important; margin-top:22px; line-height:1.6;'>
+        {_tips_flujo.get(_tipo_flujo_sel,"")}</div>""", unsafe_allow_html=True)
+
+            _tiene_estac = st.checkbox(
+                "🅿️ El local tiene cajones de estacionamiento propios o estacionamiento al frente",
+                value=False,
+                key="tiene_estacionamiento_check"
+            )
+            st.session_state["tipo_flujo"]            = _tipo_flujo_sel
+            st.session_state["tiene_estacionamiento"] = _tiene_estac
+    with _mapc:
+        # Mapa interactivo Folium
+        try:
+            import folium
+            from streamlit_folium import st_folium
+
+            m = folium.Map(location=[19.432608, -99.133209], zoom_start=12, tiles="OpenStreetMap")
+            if not st.session_state.get(f"mapa_folium_{tier_key}"):
+                st.markdown(bloque_maphint("Escribe una dirección o toca el mapa",
+                                           "Aquí verás tu punto, la competencia alrededor y las zonas de influencia."), unsafe_allow_html=True)
+            mapa_data = st_folium(m, use_container_width=True, height=860, key=f"mapa_folium_{tier_key}", returned_objects=["last_clicked"])
+
+            lat_mapa, lng_mapa, direccion_mapa = None, None, None
+            if mapa_data and mapa_data.get("last_clicked"):
+                lat_mapa = mapa_data["last_clicked"]["lat"]
+                lng_mapa = mapa_data["last_clicked"]["lng"]
+                direccion_mapa = geocodificar_inversa(lat_mapa, lng_mapa)
+                _agent.success(f"📍 {'Seleccionado' if idioma == 'es' else 'Selected'}: {direccion_mapa}")
+        except ImportError:
+            st.caption("💡 `pip install folium streamlit-folium` para habilitar el mapa interactivo")
+            lat_mapa, lng_mapa, direccion_mapa = None, None, None
+
+else:
+    lat_mapa = lng_mapa = direccion_mapa = None
+
+# ── BOTÓN ANALIZAR + PIPELINE (dentro del panel del agente) ──────
+with _agent:
+    _auto = st.session_state.pop("_auto_analizar", False)
+    _go = False
+    if _vista == "inicio":
+        with st.container(key="btn_analizar"):
+            _go = st.button("Analizar ubicación", use_container_width=True)
+        _frases_ejemplo()
+    if _vista == "inicio" and (_go or _auto):
+
+        # Prioridad: zona elegida en "Descubrir zona" > click en mapa > texto
+        _forz = st.session_state.pop("_coords_forzadas", None)
+        if _forz:
+            lat, lng, ubicacion = _forz
+        elif 'lat_mapa' in dir() and lat_mapa and lng_mapa:
+            lat, lng  = lat_mapa, lng_mapa
+            ubicacion = direccion_mapa or f"{lat:.6f}, {lng:.6f}"
+        elif direccion_texto:
+            lat, lng  = geocodificar_direccion(direccion_texto)
+            ubicacion = direccion_texto
+        else:
+            st.error("Por favor ingresa una ubicación o haz click en el mapa." if idioma == "es"
+                     else "Please enter a location or click on the map.")
+            st.stop()
+
+        if not lat or not lng:
+            st.error("No se pudo geocodificar la ubicación." if idioma == "es" else "Could not geocode the location.")
+            st.stop()
+
+        # Recuperar datos de tipo de plaza del session_state
+        _tipo_plaza  = st.session_state.get("tipo_plaza", None)
+        _zona_mall   = st.session_state.get("zona_mall_select", "no_especificado")
+        _renta_mall  = st.session_state.get("nivel_renta_mall", "desconocido")
+        _ancla_strip = st.session_state.get("ancla_strip_select", "sin_ancla")
+        # Nuevos inputs de acceso vehicular
+        _tipo_flujo           = st.session_state.get("tipo_flujo", "peatonal")
+        _tiene_estacionamiento = st.session_state.get("tiene_estacionamiento", False)
+        _radio_sel  = st.session_state.get("radio_analisis") or None
+        _radio_eff  = radio_efectivo_analisis(_radio_sel, _tipo_plaza)
+
+        with st.spinner("🔍 Analizando ubicación..."):
+
+            # Obtener demografía primero (no depende del tipo de negocio)
+            demografia = obtener_demografia(lat, lng, ubicacion, radio_m=_radio_eff)
+
+            # Para mall: usar NSE del mall si es conocido (override)
+            if _tipo_plaza == "mall":
+                # Los malls de alto nivel elevan el NSE efectivo del análisis
+                nse_actual = demografia.get("nse_predominante","C")
+                if _renta_mall in ["alto","muy_alto"] and nse_actual not in ["A","A/B","B"]:
+                    demografia["nse_predominante"] = "B/C+"
+                    demografia["nse_override_mall"] = True
+
+            if modo == "validar":
+                competidores = buscar_competencia_por_tipo(
+                    lat, lng, tipo_negocio_seleccionado,
+                    radio=_radio_sel, tipo_plaza=_tipo_plaza
+                )
+                # Detectar contexto con tipo de negocio para motor vial preciso
+                contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_seleccionado)
+
+                # Inyectar info de plaza en el contexto
+                if _tipo_plaza:
+                    contexto["tipo_plaza"]  = _tipo_plaza
+                    contexto["zona_mall"]   = _zona_mall
+                    contexto["ancla_strip"] = _ancla_strip
+                    # Para mall: tipo_zona siempre es "comercial"
+                    if _tipo_plaza == "mall":
+                        contexto["tipo_zona"] = "comercial"
+                        contexto["badges"].append("🏬 Mall / Plaza Cerrada")
+                    elif _tipo_plaza == "strip_center":
+                        contexto["tipo_zona"] = "comercial"
+                        contexto["badges"].append("🏪 Strip Center")
+
+                contexto["radio_m"] = _radio_eff
+                score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado, _radio_eff)
+                score_ctx  = ajustar_score_por_contexto(score_base, tipo_negocio_seleccionado, contexto)
+                score_dem  = ajustar_score_por_demografia(score_ctx, tipo_negocio_seleccionado, demografia)
+
+                # Ajuste por tipo de plaza
+                score_plaza, info_plaza = ajustar_score_por_plaza(
+                    score_dem, tipo_negocio_seleccionado,
+                    _tipo_plaza, _zona_mall, _renta_mall, _ancla_strip
+                )
+                # Ajuste por acceso vehicular y estacionamiento (nuevo)
+                score, nota_vehicular = ajustar_score_por_acceso_vehicular(
+                    score_plaza, tipo_negocio_seleccionado,
+                    _tipo_flujo, _tiene_estacionamiento
+                )
+                # Guardar en contexto para reportes y prompt de Claude
+                if _tipo_plaza:
+                    contexto["info_plaza"] = info_plaza
+                contexto["tipo_flujo"]            = _tipo_flujo
+                contexto["tiene_estacionamiento"] = _tiene_estacionamiento
+                contexto["nota_vehicular"]         = nota_vehicular
+                if nota_vehicular:
+                    contexto["badges"].append("🚗 Tráfico vehicular" if _tipo_flujo == "vehicular"
+                                              else "🚶🚗 Tráfico mixto" if _tipo_flujo == "mixto"
+                                              else "🚶 Tráfico peatonal")
+
+                analisis    = generar_analisis_claude(ubicacion, competidores, idioma, "validar",
+                                                      tipo_negocio=tipo_negocio_seleccionado,
+                                                      tipo_plaza=_tipo_plaza,
+                                                      info_plaza=info_plaza if _tipo_plaza else None,
+                                                      tipo_flujo=_tipo_flujo,
+                                                      tiene_estacionamiento=_tiene_estacionamiento,
+                                                      radio_m=_radio_eff)
+                recomendaciones = None
+                tipo_negocio_top1 = tipo_negocio_seleccionado
+            else:
+                recomendaciones, contexto, demografia = recomendar_tipos_negocio(lat, lng, ubicacion, radio=_radio_sel, tipo_plaza=_tipo_plaza)
+                # Aplicar ajuste vehicular a CADA recomendación
+                for rec in (recomendaciones or []):
+                    rec["score"], rec["nota_vehicular"] = ajustar_score_por_acceso_vehicular(
+                        rec["score"], rec.get("tipo_key", ""),
+                        _tipo_flujo, _tiene_estacionamiento
+                    )
+                    rec["score"] = max(0, min(100, rec["score"]))
+                # Reordenar después del ajuste vehicular (puede cambiar el ranking)
+                if recomendaciones:
+                    recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
+                competidores = recomendaciones[0]["competidores"] if recomendaciones else []
+                score        = recomendaciones[0]["score"] if recomendaciones else 0
+                desglose     = recomendaciones[0]["desglose"] if recomendaciones else {}
+                tipo_negocio_top1 = recomendaciones[0]["tipo_key"] if recomendaciones else None
+                # Inyectar plaza en contexto para recomendar también
+                if _tipo_plaza:
+                    contexto["tipo_plaza"] = _tipo_plaza
+                    if _tipo_plaza == "mall":
+                        contexto["tipo_zona"] = "comercial"
+                        contexto["badges"].append("🏬 Mall / Plaza Cerrada")
+                        for rec in (recomendaciones or []):
+                            rec["score"], _ip = ajustar_score_por_plaza(
+                                rec["score"], rec.get("tipo_key",""),
+                                _tipo_plaza, _zona_mall, _renta_mall, "sin_ancla"
+                            )
+                            rec["score"] = max(0, min(100, rec["score"]))
+                        recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
+                    elif _tipo_plaza == "strip_center":
+                        contexto["tipo_zona"] = "comercial"
+                        contexto["badges"].append("🏪 Strip Center")
+                # Re-detectar contexto con el tipo de negocio top1 para motor vial preciso
+                if tipo_negocio_top1:
+                    contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_top1)
+                    if _tipo_plaza:
+                        contexto["tipo_plaza"] = _tipo_plaza
+                # Inyectar acceso vehicular en contexto
+                contexto["tipo_flujo"]            = _tipo_flujo
+                contexto["tiene_estacionamiento"] = _tiene_estacionamiento
+                nota_veh_top1 = recomendaciones[0].get("nota_vehicular", "") if recomendaciones else ""
+                contexto["nota_vehicular"] = nota_veh_top1
+                contexto["radio_m"] = _radio_eff
+                if nota_veh_top1 and _tipo_flujo != "peatonal":
+                    contexto["badges"].append("🚗 Tráfico vehicular" if _tipo_flujo == "vehicular" else "🚶🚗 Tráfico mixto")
+                analisis = generar_analisis_claude(ubicacion, [], idioma, "recomendar",
+                                                   recomendaciones=recomendaciones,
+                                                   tipo_plaza=_tipo_plaza,
+                                                   tipo_flujo=_tipo_flujo,
+                                                   tiene_estacionamiento=_tiene_estacionamiento)
+
+        # Guardar resultados en session_state para evitar re-run al interactuar con mapas
+        st.session_state.resultados = {
+            "ubicacion": ubicacion, "lat": lat, "lng": lng,
+            "score": score, "desglose": desglose, "analisis": analisis,
+            "competidores": competidores, "contexto": contexto,
+            "demografia": demografia, "recomendaciones": recomendaciones,
+            "modo": modo, "tipo_negocio": tipo_negocio_seleccionado,
+            "tipo_negocio_top1": tipo_negocio_top1, "idioma": idioma, "radio_m": _radio_eff,
+        }
+        # META CAPI — ViewContent
+        _meta_capi("ViewContent", content_name=f"{ubicacion[:50]} | score:{score:.0f}")
+        st.rerun()
+
+
+# ── Recuperar resultados de session_state si existen ──────────────
+def _mostrar_ejemplo():
+    """Tarjeta de ejemplo (prueba social) debajo del formulario."""
+    st.markdown(
     """
 <div style="background:#F9F9F9; border:1px solid #EBEBEB; border-radius:14px;
      padding:16px 20px; margin:12px auto 8px; max-width:560px;">
@@ -6576,538 +7298,12 @@ st.markdown(
     </p>
 </div>
     """,
-    unsafe_allow_html=True
-)
-
-st.markdown("---")
-
-# ── SISTEMA DE CÓDIGOS ──────────────────────
-col_code, col_btn = st.columns([3, 1])
-with col_code:
-    codigo_input = st.text_input("", placeholder=t["placeholder_codigo"],
-                                  key="codigo_input", label_visibility="collapsed")
-with col_btn:
-    aplicar = st.button(t["validar_codigo"], use_container_width=True)
-
-# Estado del tier en session_state
-if "tier_activo" not in st.session_state:
-    st.session_state.tier_activo = "free"
-
-if aplicar and codigo_input:
-    resultado = validar_codigo(codigo_input)
-    if resultado is None:
-        st.error(t["codigo_invalido"])
-    elif resultado == "agotado":
-        st.error("❌ Este código ya alcanzó el límite de 3 análisis. Adquiere un nuevo código en hola@4site.mx")
-    else:
-        st.session_state.tier_activo = resultado
-        st.session_state.codigo_activo = codigo_input.strip().upper()
-        activar_codigo(codigo_input)
-        tier_info = TIERS[resultado]
-        _usos_rest = usos_restantes(codigo_input)
-        _usos_txt = f"· {_usos_rest} análisis restante{'s' if _usos_rest != 1 else ''}" if not (codigo_input.strip().upper().endswith("-TEST") or codigo_input.strip().upper() == "TEST") else ""
-        st.success(f"{t['codigo_valido']} **{tier_info['nombre']}** — {tier_info['precio']} · {tier_info['pdf_paginas']} {_usos_txt}")
-
-# Botón para continuar sin código
-col_gratis, _ = st.columns([1, 2])
-with col_gratis:
-    if st.button("🔍 Analizar mi ubicación gratis", use_container_width=True, type="primary"):
-        st.session_state.tier_activo = "free"
-
-# Link secundario para código
-st.markdown("""
-<p style='font-size:12px; color:#888; margin:4px 0 0;'>
-    ¿Ya compraste? <a href='#' style='color:#2A6FDB;'>Ingresa tu código arriba</a>
-</p>
-""", unsafe_allow_html=True)
-
-# Mostrar tier activo (solo si tiene código activo — no mostrar en free por default)
-tier_key   = st.session_state.tier_activo
-tier_info  = TIERS[tier_key]
-tier_color = tier_info["color"]
-
-if tier_key != "free":
-    st.markdown(f"""
-<div style='padding:10px 16px; background:{tier_color}18; border-left:4px solid {tier_color};
-     border-radius:6px; margin:8px 0;'>
-    <b style='color:{tier_color};'>{t['tier_activo']} {tier_info['nombre']} — {tier_info['precio']}</b>
-    &nbsp;·&nbsp; {tier_info['pdf_paginas']}
-    &nbsp;·&nbsp; Top {tier_info['top_negocios']} negocios
-    &nbsp;·&nbsp; {tier_info['competidores_mostrados']} competidores
-    {'&nbsp;·&nbsp; ✅ Demografía' if tier_info['muestra_demografia'] else ''}
-    {'&nbsp;·&nbsp; ✅ Desglose score' if tier_info['muestra_score_desglose'] else ''}
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown("---")
-
-# ── MODO DE ANÁLISIS (según plan) ─────────────────────────────
-# Free: validar · Básico: + descubrir negocio · PRO/Premium: + zona potencial
-_MODOS_TIER = {
-    "free":     ["validar"],
-    "basic":    ["validar", "recomendar"],
-    "pro":      ["validar", "recomendar", "zona_potencial"],
-    "premium":  ["validar", "recomendar", "zona_potencial"],
-    "premium2": ["validar", "recomendar", "zona_potencial"],
-}
-_MODO_LABEL = {
-    "validar":        ("✅ Validar mi idea", "¿Funciona MI giro en esta ubicación?"),
-    "recomendar":     ("🎯 Descubrir negocio", "¿Qué giro conviene más en esta ubicación?"),
-    "zona_potencial": ("🗺️ Descubrir zona", "¿Dónde conviene abrir mi giro?"),
-}
-st.markdown(f"### {t['modo_analisis']}")
-_modos = _MODOS_TIER.get(tier_key, ["validar"])
-modo = st.radio("Modo de análisis", options=_modos, horizontal=True, key=f"modo_sel_{tier_key}",
-                format_func=lambda x: _MODO_LABEL[x][0],
-                captions=[_MODO_LABEL[x][1] for x in _modos], label_visibility="collapsed")
-_bloq = [m for m in ["recomendar", "zona_potencial"] if m not in _modos]
-if _bloq:
-    st.caption("🔒 " + " · ".join(
-        f"**{_MODO_LABEL[m][0]}** desde plan {'Básico ($99)' if m == 'recomendar' else 'PRO ($499)'}" for m in _bloq))
-
-if modo == "zona_potencial":
-    st.markdown("---")
-    render_modo_zona(tier_key, idioma)
-    st.stop()
-
-tipo_negocio_seleccionado = None
-if modo == "validar":
-    st.markdown(f"**{t['selecciona_tipo']}**")
-    tipo_negocio_seleccionado = st.selectbox("Giro a validar", options=list(TIPOS_NEGOCIO.keys()), key="tipo_validar",
-                                              format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"],
-                                              label_visibility="collapsed")
-
-st.markdown("---")
-
-# ── INPUT DE UBICACIÓN ──────────────────────
-st.markdown(f"### {t['input_ubicacion']}")
-direccion_texto = st.text_input("", placeholder=t["placeholder_direccion"],
-                                 key="direccion_input", label_visibility="collapsed")
-
-# ── Detección automática de tipo de plaza ─────────────────────
-_tipo_plaza_detectado = detectar_tipo_plaza(direccion_texto or "")
-tipo_plaza = None  # se definirá abajo
-
-# PRO y PREMIUM: selector siempre visible (con default inteligente de auto-detección)
-if tier_key in ["pro", "premium", "premium2"]:
-
-    _default_plaza = {
-        "mall":          "mall",
-        "strip_center":  "strip_center",
-        "plaza_ambigua": "strip_center",
-    }.get(_tipo_plaza_detectado, "calle")
-
-    if _tipo_plaza_detectado in ["mall", "strip_center", "plaza_ambigua"]:
-        _det_labels = {
-            "mall":          "🏬 Detectamos que tu dirección corresponde a un mall o plaza cerrada.",
-            "strip_center":  "🏪 Detectamos que tu dirección corresponde a un strip center o plaza abierta.",
-            "plaza_ambigua": "🏢 Detectamos que tu dirección puede estar dentro de una plaza — confirma el tipo.",
-        }
-        st.markdown(f"""<div style='background:#F5F7FA; border-left:4px solid #D98A1F;
-            border-radius:6px; padding:8px 14px; margin:2px 0 6px;'>
-            <span style='color:#D98A1F; font-size:12px;'>{_det_labels[_tipo_plaza_detectado]}
-            Confirma o ajusta abajo.</span></div>""", unsafe_allow_html=True)
-
-    st.markdown("**¿Esta ubicación está dentro de una plaza comercial?**")
-    _col_pz1, _col_pz2 = st.columns([3, 2])
-    with _col_pz1:
-        _tipo_plaza_sel = st.radio(
-            "",
-            options=["calle", "strip_center", "mall"],
-            format_func=lambda x: {
-                "calle":        "🚶 No — está en calle, avenida o edificio normal",
-                "strip_center": "🏪 Sí — Plaza abierta / Strip center (locales con cajones al frente)",
-                "mall":         "🏬 Sí — Mall / Plaza cerrada (tipo Galerías, Antara, Perisur)",
-            }.get(x, x),
-            index=["calle", "strip_center", "mall"].index(_default_plaza),
-            key="tipo_plaza_radio_pro",
-            horizontal=False,
-            label_visibility="collapsed",
-        )
-    tipo_plaza = None if _tipo_plaza_sel == "calle" else _tipo_plaza_sel
-
-    with _col_pz2:
-        if tipo_plaza == "mall":
-            st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
-                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
-                <b style='color:#2A6FDB;'>Mall cerrado</b><br>
-                Amplía radio de competencia a 1km, aplica lógica de tráfico captivo
-                y ajusta ROI por renta elevada.</div>""", unsafe_allow_html=True)
-        elif tipo_plaza == "strip_center":
-            st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
-                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
-                <b style='color:#2A6FDB;'>Strip center / plaza abierta</b><br>
-                Visibilidad desde la calle, tráfico mixto paso + destino.
-                La tienda ancla tiene alto impacto.</div>""", unsafe_allow_html=True)
-        else:
-            st.markdown("""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
-                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A;'>
-                <b style='color:#13243B;'>Calle / avenida</b><br>
-                Análisis estándar: visibilidad de paso, vialidad y demografía del entorno.
-                </div>""", unsafe_allow_html=True)
-
-else:
-    # FREE y BÁSICO: solo auto-detección
-    if _tipo_plaza_detectado == "mall":
-        tipo_plaza = "mall"
-        st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #2A6FDB;
-            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-            <span style='color:#2A6FDB; font-weight:700;'>🏬 Mall / Plaza Cerrada detectado</span><br>
-            <span style='color:#5C6B7A; font-size:12px;'>
-            El análisis aplicará lógica especial para plazas cerradas.</span>
-            </div>""", unsafe_allow_html=True)
-    elif _tipo_plaza_detectado == "strip_center":
-        tipo_plaza = "strip_center"
-        st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #2A6FDB;
-            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-            <span style='color:#2A6FDB; font-weight:700;'>🏪 Strip Center / Plaza Abierta detectada</span><br>
-            <span style='color:#5C6B7A; font-size:12px;'>
-            Análisis con lógica de plaza abierta.</span>
-            </div>""", unsafe_allow_html=True)
-    elif _tipo_plaza_detectado == "plaza_ambigua" and direccion_texto:
-        st.markdown("""<div style='background:#F5F7FA; border-left:4px solid #D98A1F;
-            border-radius:6px; padding:10px 14px; margin:4px 0 8px;'>
-            <span style='color:#D98A1F; font-weight:700;'>🏢 ¿Qué tipo de plaza es?</span><br>
-            <span style='color:#5C6B7A; font-size:12px;'>
-            Detectamos que tu ubicación está dentro de una plaza.</span>
-            </div>""", unsafe_allow_html=True)
-        tipo_plaza = st.radio(
-            "",
-            options=["strip_center", "mall", "no_plaza"],
-            format_func=lambda x: {
-                "strip_center": "🏪 Plaza abierta / Strip center",
-                "mall":         "🏬 Mall / Plaza cerrada",
-                "no_plaza":     "🚶 No es plaza — calle normal",
-            }.get(x, x),
-            key="tipo_plaza_radio",
-            horizontal=False,
-        )
-        if tipo_plaza == "no_plaza":
-            tipo_plaza = None
-
-# ── Info adicional para MALL (todos los tiers) ──────────────────────────────
-if tipo_plaza == "mall":
-    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        zona_mall = st.selectbox(
-            "📍 Zona dentro del mall:",
-            options=["no_especificado","food_court","moda_accesorios","servicios",
-                     "ancla_principal","planta_baja_entrada","piso_superior"],
-            format_func=lambda x: {
-                "no_especificado":    "No sé / no especificado",
-                "food_court":         "🍽️ Food court / zona de comida",
-                "moda_accesorios":    "👗 Moda / accesorios / lifestyle",
-                "servicios":          "💈 Servicios (salud, belleza, etc.)",
-                "ancla_principal":    "⚓ Cerca de ancla (Liverpool, Walmart, Cine)",
-                "planta_baja_entrada":"🚪 Planta baja / entrada principal",
-                "piso_superior":      "⬆️ Piso superior / menor tráfico",
-            }.get(x, x),
-            key="zona_mall_select",
-        )
-    with col_m2:
-        nivel_renta_mall = st.selectbox(
-            "💰 Nivel de renta estimada:",
-            options=["desconocido","bajo","medio","alto","muy_alto"],
-            format_func=lambda x: {
-                "desconocido": "No sé / no tengo dato",
-                "bajo":        "💚 Baja — < $400/m² mes",
-                "medio":       "🟡 Media — $400–$800/m² mes",
-                "alto":        "🟠 Alta — $800–$1,500/m² mes",
-                "muy_alto":    "🔴 Muy alta — > $1,500/m² mes",
-            }.get(x, x),
-            key="nivel_renta_mall",
-        )
-    # zona_mall y nivel_renta_mall ya están en session_state via sus widget keys
-
-elif tipo_plaza == "strip_center":
-    st.markdown("<div style='margin-top:6px'></div>", unsafe_allow_html=True)
-    _col_sc1, _col_sc2 = st.columns(2)
-    with _col_sc1:
-        ancla_strip = st.selectbox(
-            "⚓ ¿Hay una tienda ancla en la plaza?",
-            options=["sin_ancla","walmart","chedraui","soriana","oxxo","farmacias","banco","otra"],
-            format_func=lambda x: {
-                "sin_ancla":  "Sin ancla identificable",
-                "walmart":    "🛒 Walmart / Bodega Aurrerá / Sam's",
-                "chedraui":   "🛒 Chedraui / Superama",
-                "soriana":    "🛒 Soriana / Comercial Mexicana",
-                "oxxo":       "🏪 OXXO / tienda de conveniencia",
-                "farmacias":  "💊 Farmacia cadena (Similares, Benavides, etc.)",
-                "banco":      "🏦 Banco / cajero",
-                "otra":       "Otra tienda ancla",
-            }.get(x, x),
-            key="ancla_strip_select",
-        )
-    with _col_sc2:
-        _tips_ancla = {
-            "walmart":   "🛒 Flujo familiar constante — ideal para comida rápida, farmacia y servicios.",
-            "chedraui":  "🛒 NSE ligeramente más alto — funciona bien para café y papelería.",
-            "soriana":   "🛒 Buen flujo de compra semanal, similar a Chedraui.",
-            "oxxo":      "🏪 Muy alto tráfico de paso — ideal para comida y servicios rápidos.",
-            "farmacias": "💊 Clientela recurrente y de confianza — excelente para salud y nutrición.",
-            "banco":     "🏦 Genera cola de espera — clientes disponibles frente al local.",
-            "sin_ancla": "Sin ancla: el tráfico depende 100% de visibilidad exterior.",
-            "otra":      "Evalúa qué clientela atrae el ancla y si es compatible con tu negocio.",
-        }
-        if ancla_strip in _tips_ancla:
-            st.markdown(f"""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
-                border-radius:6px; padding:8px 12px; font-size:11px; color:#5C6B7A; margin-top:22px;'>
-                {_tips_ancla[ancla_strip]}</div>""", unsafe_allow_html=True)
-    # ancla_strip ya está en session_state via su widget key
-
-# Guardar tipo_plaza en session_state para usarlo en el análisis
-st.session_state["tipo_plaza"] = tipo_plaza
-
-# ── RADIO DE ANÁLISIS ─────────────────────────────────────────────
-_radio_default = radio_efectivo_analisis(None, tipo_plaza)
-_radio_opciones = {"free": [500], "basic": [300, 500, 600, 800, 1000]}.get(
-    tier_key, [300, 500, 600, 800, 1000, 1500, 2000])
-st.markdown("**📏 Radio de análisis de competencia**")
-if len(_radio_opciones) == 1:
-    st.session_state["radio_analisis"] = None
-    st.caption(f"Radio fijo de {_radio_default} m · 🔒 Elegir radio (300–1,000 m) disponible desde plan Básico")
-else:
-    if _radio_default not in _radio_opciones:
-        _radio_default = 500
-    st.session_state["radio_analisis"] = st.select_slider(
-        "Radio de análisis", options=_radio_opciones, value=_radio_default,
-        format_func=lambda x: f"{x:,} m", key=f"radio_slider_{tier_key}", label_visibility="collapsed")
-    _r_sel = st.session_state["radio_analisis"]
-    _tip_radio = ("zona de influencia peatonal inmediata" if _r_sel <= 400 else
-                  "radio estándar de tienda de barrio / paso" if _r_sel <= 600 else
-                  "radio de negocio mixto o de destino" if _r_sel <= 1000 else
-                  "radio de destino (el cliente llega en auto)")
-    st.caption(f"{_r_sel:,} m — {_tip_radio}. El score se normaliza por área, así que un radio mayor no te castiga solo por abarcar más. "
-               "Google devuelve máximo 20 competidores por búsqueda (los más cercanos).")
-
-# ── FLUJO DE ACCESO Y ESTACIONAMIENTO ────────────────────────────────────────
-st.markdown("**¿Cómo llegan principalmente los clientes a esta zona?**")
-_col_flujo1, _col_flujo2 = st.columns([3, 2])
-with _col_flujo1:
-    _tipo_flujo_sel = st.radio(
-        "",
-        options=["peatonal", "vehicular", "mixto"],
-        format_func=lambda x: {
-            "peatonal":  "🚶 Principalmente a pie — zona peatonal o mucho tránsito caminando",
-            "vehicular": "🚗 Principalmente en auto — la mayoría llega en vehículo",
-            "mixto":     "🚶🚗 Mixto — hay tanto peatones como autos",
-        }.get(x, x),
-        index=0,
-        key="tipo_flujo_radio",
-        horizontal=False,
-        label_visibility="collapsed",
+        unsafe_allow_html=True
     )
 
-with _col_flujo2:
-    _tips_flujo = {
-        "peatonal":  "La ubicación depende de la visibilidad y el paso constante de personas. Zonas como centros, mercados o corredores comerciales.",
-        "vehicular": "El cliente llega con intención. Necesitas visibilidad desde la calle y acceso fácil para entrar y salir.",
-        "mixto":     "Buen balance: la ubicación puede captar tanto clientes de paso como clientes que vienen a propósito.",
-    }
-    st.markdown(f"""<div style='background:#F5F7FA; border-left:3px solid #2A6FDB;
-        border-radius:6px; padding:10px 14px; font-size:11px; color:#5C6B7A !important; margin-top:22px; line-height:1.6;'>
-        {_tips_flujo.get(_tipo_flujo_sel,"")}</div>""", unsafe_allow_html=True)
-
-_tiene_estac = st.checkbox(
-    "🅿️ El local tiene cajones de estacionamiento propios o estacionamiento al frente",
-    value=False,
-    key="tiene_estacionamiento_check"
-)
-st.session_state["tipo_flujo"]            = _tipo_flujo_sel
-st.session_state["tiene_estacionamiento"] = _tiene_estac
 
 
 
-# Mapa interactivo Folium
-st.markdown(f"**{'O haz click en el mapa:' if idioma == 'es' else 'Or click on the map:'}**")
-try:
-    import folium
-    from streamlit_folium import st_folium
-
-    m = folium.Map(location=[19.432608, -99.133209], zoom_start=12)
-    m.add_child(folium.LatLngPopup())
-    mapa_data = st_folium(m, width=700, height=350, key=f"mapa_folium_{tier_key}")
-
-    lat_mapa, lng_mapa, direccion_mapa = None, None, None
-    if mapa_data and mapa_data.get("last_clicked"):
-        lat_mapa = mapa_data["last_clicked"]["lat"]
-        lng_mapa = mapa_data["last_clicked"]["lng"]
-        direccion_mapa = geocodificar_inversa(lat_mapa, lng_mapa)
-        st.success(f"📍 {'Seleccionado' if idioma == 'es' else 'Selected'}: {direccion_mapa}")
-except ImportError:
-    st.caption("💡 `pip install folium streamlit-folium` para habilitar el mapa interactivo")
-    lat_mapa, lng_mapa, direccion_mapa = None, None, None
-
-st.markdown("---")
-
-# ── BOTÓN ANALIZAR ──────────────────────────
-_auto = st.session_state.pop("_auto_analizar", False)
-if st.button(t["boton_analizar"], type="primary", use_container_width=True) or _auto:
-
-    # Prioridad: zona elegida en "Descubrir zona" > click en mapa > texto
-    _forz = st.session_state.pop("_coords_forzadas", None)
-    if _forz:
-        lat, lng, ubicacion = _forz
-    elif 'lat_mapa' in dir() and lat_mapa and lng_mapa:
-        lat, lng  = lat_mapa, lng_mapa
-        ubicacion = direccion_mapa or f"{lat:.6f}, {lng:.6f}"
-    elif direccion_texto:
-        lat, lng  = geocodificar_direccion(direccion_texto)
-        ubicacion = direccion_texto
-    else:
-        st.error("Por favor ingresa una ubicación o haz click en el mapa." if idioma == "es"
-                 else "Please enter a location or click on the map.")
-        st.stop()
-
-    if not lat or not lng:
-        st.error("No se pudo geocodificar la ubicación." if idioma == "es" else "Could not geocode the location.")
-        st.stop()
-
-    # Recuperar datos de tipo de plaza del session_state
-    _tipo_plaza  = st.session_state.get("tipo_plaza", None)
-    _zona_mall   = st.session_state.get("zona_mall_select", "no_especificado")
-    _renta_mall  = st.session_state.get("nivel_renta_mall", "desconocido")
-    _ancla_strip = st.session_state.get("ancla_strip_select", "sin_ancla")
-    # Nuevos inputs de acceso vehicular
-    _tipo_flujo           = st.session_state.get("tipo_flujo", "peatonal")
-    _tiene_estacionamiento = st.session_state.get("tiene_estacionamiento", False)
-    _radio_sel  = st.session_state.get("radio_analisis") or None
-    _radio_eff  = radio_efectivo_analisis(_radio_sel, _tipo_plaza)
-
-    with st.spinner("🔍 Analizando ubicación..."):
-
-        # Obtener demografía primero (no depende del tipo de negocio)
-        demografia = obtener_demografia(lat, lng, ubicacion, radio_m=_radio_eff)
-
-        # Para mall: usar NSE del mall si es conocido (override)
-        if _tipo_plaza == "mall":
-            # Los malls de alto nivel elevan el NSE efectivo del análisis
-            nse_actual = demografia.get("nse_predominante","C")
-            if _renta_mall in ["alto","muy_alto"] and nse_actual not in ["A","A/B","B"]:
-                demografia["nse_predominante"] = "B/C+"
-                demografia["nse_override_mall"] = True
-
-        if modo == "validar":
-            competidores = buscar_competencia_por_tipo(
-                lat, lng, tipo_negocio_seleccionado,
-                radio=_radio_sel, tipo_plaza=_tipo_plaza
-            )
-            # Detectar contexto con tipo de negocio para motor vial preciso
-            contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_seleccionado)
-
-            # Inyectar info de plaza en el contexto
-            if _tipo_plaza:
-                contexto["tipo_plaza"]  = _tipo_plaza
-                contexto["zona_mall"]   = _zona_mall
-                contexto["ancla_strip"] = _ancla_strip
-                # Para mall: tipo_zona siempre es "comercial"
-                if _tipo_plaza == "mall":
-                    contexto["tipo_zona"] = "comercial"
-                    contexto["badges"].append("🏬 Mall / Plaza Cerrada")
-                elif _tipo_plaza == "strip_center":
-                    contexto["tipo_zona"] = "comercial"
-                    contexto["badges"].append("🏪 Strip Center")
-
-            contexto["radio_m"] = _radio_eff
-            score_base, desglose = calcular_score_competencia(competidores, tipo_negocio_seleccionado, _radio_eff)
-            score_ctx  = ajustar_score_por_contexto(score_base, tipo_negocio_seleccionado, contexto)
-            score_dem  = ajustar_score_por_demografia(score_ctx, tipo_negocio_seleccionado, demografia)
-
-            # Ajuste por tipo de plaza
-            score_plaza, info_plaza = ajustar_score_por_plaza(
-                score_dem, tipo_negocio_seleccionado,
-                _tipo_plaza, _zona_mall, _renta_mall, _ancla_strip
-            )
-            # Ajuste por acceso vehicular y estacionamiento (nuevo)
-            score, nota_vehicular = ajustar_score_por_acceso_vehicular(
-                score_plaza, tipo_negocio_seleccionado,
-                _tipo_flujo, _tiene_estacionamiento
-            )
-            # Guardar en contexto para reportes y prompt de Claude
-            if _tipo_plaza:
-                contexto["info_plaza"] = info_plaza
-            contexto["tipo_flujo"]            = _tipo_flujo
-            contexto["tiene_estacionamiento"] = _tiene_estacionamiento
-            contexto["nota_vehicular"]         = nota_vehicular
-            if nota_vehicular:
-                contexto["badges"].append("🚗 Tráfico vehicular" if _tipo_flujo == "vehicular"
-                                          else "🚶🚗 Tráfico mixto" if _tipo_flujo == "mixto"
-                                          else "🚶 Tráfico peatonal")
-
-            analisis    = generar_analisis_claude(ubicacion, competidores, idioma, "validar",
-                                                  tipo_negocio=tipo_negocio_seleccionado,
-                                                  tipo_plaza=_tipo_plaza,
-                                                  info_plaza=info_plaza if _tipo_plaza else None,
-                                                  tipo_flujo=_tipo_flujo,
-                                                  tiene_estacionamiento=_tiene_estacionamiento,
-                                                  radio_m=_radio_eff)
-            recomendaciones = None
-            tipo_negocio_top1 = tipo_negocio_seleccionado
-        else:
-            recomendaciones, contexto, demografia = recomendar_tipos_negocio(lat, lng, ubicacion, radio=_radio_sel, tipo_plaza=_tipo_plaza)
-            # Aplicar ajuste vehicular a CADA recomendación
-            for rec in (recomendaciones or []):
-                rec["score"], rec["nota_vehicular"] = ajustar_score_por_acceso_vehicular(
-                    rec["score"], rec.get("tipo_key", ""),
-                    _tipo_flujo, _tiene_estacionamiento
-                )
-                rec["score"] = max(0, min(100, rec["score"]))
-            # Reordenar después del ajuste vehicular (puede cambiar el ranking)
-            if recomendaciones:
-                recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
-            competidores = recomendaciones[0]["competidores"] if recomendaciones else []
-            score        = recomendaciones[0]["score"] if recomendaciones else 0
-            desglose     = recomendaciones[0]["desglose"] if recomendaciones else {}
-            tipo_negocio_top1 = recomendaciones[0]["tipo_key"] if recomendaciones else None
-            # Inyectar plaza en contexto para recomendar también
-            if _tipo_plaza:
-                contexto["tipo_plaza"] = _tipo_plaza
-                if _tipo_plaza == "mall":
-                    contexto["tipo_zona"] = "comercial"
-                    contexto["badges"].append("🏬 Mall / Plaza Cerrada")
-                    for rec in (recomendaciones or []):
-                        rec["score"], _ip = ajustar_score_por_plaza(
-                            rec["score"], rec.get("tipo_key",""),
-                            _tipo_plaza, _zona_mall, _renta_mall, "sin_ancla"
-                        )
-                        rec["score"] = max(0, min(100, rec["score"]))
-                    recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
-                elif _tipo_plaza == "strip_center":
-                    contexto["tipo_zona"] = "comercial"
-                    contexto["badges"].append("🏪 Strip Center")
-            # Re-detectar contexto con el tipo de negocio top1 para motor vial preciso
-            if tipo_negocio_top1:
-                contexto = detectar_contexto_ubicacion(lat, lng, ubicacion, tipo_negocio_top1)
-                if _tipo_plaza:
-                    contexto["tipo_plaza"] = _tipo_plaza
-            # Inyectar acceso vehicular en contexto
-            contexto["tipo_flujo"]            = _tipo_flujo
-            contexto["tiene_estacionamiento"] = _tiene_estacionamiento
-            nota_veh_top1 = recomendaciones[0].get("nota_vehicular", "") if recomendaciones else ""
-            contexto["nota_vehicular"] = nota_veh_top1
-            contexto["radio_m"] = _radio_eff
-            if nota_veh_top1 and _tipo_flujo != "peatonal":
-                contexto["badges"].append("🚗 Tráfico vehicular" if _tipo_flujo == "vehicular" else "🚶🚗 Tráfico mixto")
-            analisis = generar_analisis_claude(ubicacion, [], idioma, "recomendar",
-                                               recomendaciones=recomendaciones,
-                                               tipo_plaza=_tipo_plaza,
-                                               tipo_flujo=_tipo_flujo,
-                                               tiene_estacionamiento=_tiene_estacionamiento)
-
-    # Guardar resultados en session_state para evitar re-run al interactuar con mapas
-    st.session_state.resultados = {
-        "ubicacion": ubicacion, "lat": lat, "lng": lng,
-        "score": score, "desglose": desglose, "analisis": analisis,
-        "competidores": competidores, "contexto": contexto,
-        "demografia": demografia, "recomendaciones": recomendaciones,
-        "modo": modo, "tipo_negocio": tipo_negocio_seleccionado,
-        "tipo_negocio_top1": tipo_negocio_top1, "idioma": idioma, "radio_m": _radio_eff,
-    }
-    # META CAPI — ViewContent
-    _meta_capi("ViewContent", content_name=f"{ubicacion[:50]} | score:{score:.0f}")
-
-# ── Recuperar resultados de session_state si existen ──────────────
 if "resultados" in st.session_state:
     _r = st.session_state.resultados
     ubicacion            = _r["ubicacion"]
@@ -7142,20 +7338,17 @@ if "resultados" in st.session_state:
     # DASHBOARD TIPO AGENTE (vista principal)
     # ══════════════════════════════════════════
     if DASHBOARD_OK:
-        st.markdown("""<style>
-        .main .block-container, [data-testid="stMainBlockContainer"], .block-container {
-            max-width: 1680px !important; padding-left: 1.2rem !important; padding-right: 1.2rem !important; }
-        </style>""", unsafe_allow_html=True)
-        _dash_data = preparar_datos_dashboard(_r, tier_key)
-        _col_agente, _col_dash = st.columns([1.05, 3.5], gap="small")
-        with _col_dash:
-            _render_dashboard(_datos_para_navegador(_dash_data), height=1010)
-        with _col_agente:
-            _render_panel_agente(claude, _dash_data, tier_key, idioma)
+        with _agent:
+            _dash_data = preparar_datos_dashboard(_r, tier_key)
+            render_conversacion_sitio(_dash_data, _r, tier_key, idioma)
+        with _mapc:
+            render_mapa(html_mapa_sitio(_datos_para_navegador(_dash_data)), 860)
     else:
         st.warning(f"Dashboard no disponible: {_DASH_ERROR}")
 
-    _ver_detalle = st.toggle("📑 Ver análisis detallado (vista clásica)", value=not DASHBOARD_OK, key="toggle_vista_clasica")
+    nivel, color = nivel_score(score, idioma)   # se usan también fuera de la vista completa
+    st.markdown("<div id='analisis-completo'></div>", unsafe_allow_html=True)
+    _ver_detalle = st.toggle("📑 Ver el análisis completo (todas las secciones)", value=not DASHBOARD_OK, key="toggle_vista_clasica")
     if _ver_detalle:
         st.markdown(f"## {t['titulo_analisis']}")
         if modo == "validar":
