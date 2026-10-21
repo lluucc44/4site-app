@@ -143,7 +143,18 @@ _HTML = r"""<!doctype html>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script>
+/* Mapa base sin API key: OpenStreetMap en gris; si falla, Esri World Street Map */
+function addBase(m){
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+  let errs = 0, swapped = false;
+  osm.on('tileerror',()=>{ if (swapped || ++errs < 4) return; swapped = true; m.removeLayer(osm);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(m); });
+  osm.addTo(m);
+}
+</script>
 <style>
+.leaflet-tile-pane{filter:grayscale(.9) contrast(.9) brightness(1.06)}
 :root{
   --navy:#13243B; --blue:#2A6FDB; --blue-2:#1F5FC2; --bg:#F3F5F9; --card:#FFFFFF;
   --line:#E3E8EF; --muted:#5C6B7A; --faint:#8C99A8; --green:#1F9D57; --amber:#D98A1F; --red:#E0524A;
@@ -458,7 +469,7 @@ if ((D.giros||[]).length) setTimeout(drawRanking, 0);
 const map = L.map('map', {zoomControl:false, attributionControl:true}).setView([D.lat, D.lng], 15);
 L.control.zoom({position:'bottomright'}).addTo(map);
 L.control.scale({position:'bottomright', imperial:false}).addTo(map);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {attribution:'© OpenStreetMap © CARTO', subdomains:'abcd', maxZoom:20}).addTo(map);
+addBase(map);
 
 const site = L.marker([D.lat, D.lng], {icon: L.divIcon({className:'', html:'<div class="site-pin">★</div>', iconSize:[22,22], iconAnchor:[11,11]}), zIndexOffset:1000})
   .bindPopup(`<b>Tu ubicación</b><br>${esc(D.ubicacion)}<br>Score: <b style="color:${scoreColor(D.score)}">${D.score}/100</b>`).addTo(map);
@@ -708,15 +719,15 @@ LIMITE_PREGUNTAS = {"free": 1, "basic": 5, "pro": 15, "premium": 30, "premium2":
 
 SUGERENCIAS_ZONA = [
     "¿Cuál zona elegirías tú y por qué?",
-    "¿Qué riesgos tiene la zona #1?",
-    "¿Conviene más mercado probado o zona virgen?",
-    "¿Qué debo validar en campo antes de rentar?",
+    "¿Qué riesgos tiene la zona 1?",
+    "¿Me conviene donde ya hay clientes o donde no hay nadie?",
+    "¿Qué reviso en persona antes de rentar?",
 ]
 
 SUGERENCIAS = [
     "¿Qué opinas de esta ubicación?",
     "¿Cuáles son los principales riesgos?",
-    "¿Qué precio o ticket debería manejar?",
+    "¿Qué precio debería cobrar?",
     "¿Cómo me diferencio de la competencia?",
 ]
 
@@ -811,85 +822,95 @@ def _pasos_render(pasos):
     )
 
 
+AVATAR_AGENTE = "📍"
+AVATAR_USUARIO = "🙂"
+
+_CSS_AGENTE = """<style>
+[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { font-size: 14px !important; line-height: 1.55 !important; }
+[data-testid="stChatMessage"] { padding: 6px 4px !important; }
+.ag-head{display:flex;align-items:center;gap:12px;margin:18px 0 10px}
+.ag-ico{width:38px;height:38px;border-radius:10px;background:#2A6FDB;color:#fff;font-size:19px;display:flex;align-items:center;justify-content:center;flex:none}
+.ag-t{font-weight:800;font-size:17px;color:#13243B;line-height:1.15}
+.ag-s{font-size:12.5px;color:#5C6B7A;margin-top:2px}
+.ag-q{margin-left:auto;background:#EEF3FB;color:#2A6FDB;font-weight:700;font-size:12px;border-radius:99px;padding:5px 12px;white-space:nowrap}
+</style>"""
+
+
 def render_panel_agente(claude, data: dict, tier_key: str, idioma: str = "es",
-                        modelo: str = "claude-sonnet-4-5", alto_chat: int = 470):
-    """Panel lateral tipo agente: pasos del análisis + chat sobre los resultados."""
+                        modelo: str = "claude-sonnet-4-5", alto_chat: int = 340):
+    """Bloque 'Pregúntale al agente' a todo lo ancho, debajo del dashboard."""
     aid = data.get("id", "x")
     k_msgs = f"_agente_msgs_{aid}"
     k_pend = f"_agente_pend_{aid}"
     msgs = st.session_state.setdefault(k_msgs, [])
     limite = LIMITE_PREGUNTAS.get(tier_key, 1)
     usadas = sum(1 for m in msgs if m["role"] == "user")
+    restantes = max(limite - usadas, 0)
+    es_zona = data.get("modo") == "zona"
 
-    st.markdown(
-        "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>"
-        "<div style='width:28px;height:28px;border-radius:8px;background:#2A6FDB;color:#fff;font-weight:800;"
-        "display:flex;align-items:center;justify-content:center'>4</div>"
-        "<div><div style='font-weight:800;font-size:14px;color:#13243B;line-height:1.1'>Agente 4SITE</div>"
-        "<div style='font-size:10.5px;color:#8C99A8'>Análisis geoespacial asistido por IA</div></div></div>",
+    st.markdown(_CSS_AGENTE, unsafe_allow_html=True)
+    _head = st.empty()
+    _pintar_head = lambda rest: _head.markdown(
+        "<div class='ag-head'><div class='ag-ico'>💬</div><div>"
+        "<div class='ag-t'>Pregúntale al agente 4SITE</div>"
+        f"<div class='ag-s'>Responde con los datos de {'estas zonas' if es_zona else 'este análisis'}: "
+        "riesgos, competencia, precio o qué haría en tu lugar.</div></div>"
+        f"<div class='ag-q'>{rest} de {limite} pregunta{'s' if limite != 1 else ''}</div></div>",
         unsafe_allow_html=True,
     )
-    st.markdown(_pasos_html(data), unsafe_allow_html=True)
+    _pintar_head(restantes)
 
-    caja = st.container(height=alto_chat, border=True)
-
-    restantes = max(limite - usadas, 0)
+    prompt = None
     if restantes > 0:
-        cols = st.columns(2)
-        for i, sug in enumerate(SUGERENCIAS_ZONA if data.get("modo") == "zona" else SUGERENCIAS):
-            if cols[i % 2].button(sug, key=f"sug_{aid}_{i}", use_container_width=True):
+        sugs = SUGERENCIAS_ZONA if es_zona else SUGERENCIAS
+        cols = st.columns(len(sugs))
+        for i, sug in enumerate(sugs):
+            if cols[i].button(sug, key=f"sug_{aid}_{i}", use_container_width=True):
                 st.session_state[k_pend] = sug
-        prompt = st.chat_input("Pregúntale al agente sobre esta ubicación…", key=f"chat_{aid}")
-        st.caption(f"{restantes} pregunta{'s' if restantes != 1 else ''} disponible{'s' if restantes != 1 else ''} en tu plan · La IA puede cometer errores.")
+        prompt = st.chat_input("Escribe tu pregunta…", key=f"chat_{aid}")
     else:
-        prompt = None
-        st.info("Llegaste al límite de preguntas de tu plan. Los planes PRO y Premium incluyen más consultas al agente.")
+        st.info("Usaste todas las preguntas de tu plan. PRO y Premium incluyen más consultas al agente.")
 
     prompt = prompt or st.session_state.pop(k_pend, None)
 
-    with caja:
-        if not msgs and not prompt:
-            with st.chat_message("assistant"):
-                st.markdown(
-                    (f"Barrí **{data.get('radio_km')} km** alrededor de **{data.get('ubicacion', '')[:50]}** buscando zonas para "
-                     f"**{data.get('tipo_nombre')}**. La mejor quedó en **{(data.get('zonas') or [{}])[0].get('score', '—')}/100**. "
-                     "Pregúntame cuál elegiría, qué riesgos tiene cada una o qué validar en campo.")
-                    if data.get("modo") == "zona" else
-                    (f"Hola, analicé **{data.get('ubicacion', '')[:60]}** para "
-                     f"**{data.get('tipo_nombre') or 'tu negocio'}**. Score **{data.get('score')}/100**. "
-                     "Pregúntame por riesgos, competencia, precio o qué haría yo en tu lugar.")
+    if msgs or prompt:
+        caja = st.container(height=alto_chat, border=True)
+        with caja:
+            for m in msgs:
+                with st.chat_message(m["role"], avatar=AVATAR_AGENTE if m["role"] == "assistant" else AVATAR_USUARIO):
+                    st.markdown(m["content"])
+            if prompt:
+                msgs.append({"role": "user", "content": prompt})
+                with st.chat_message("user", avatar=AVATAR_USUARIO):
+                    st.markdown(prompt)
+                contexto, bloqueados = _contexto_agente(data)
+                system = (
+                    "Eres el Agente 4SITE, analista senior de inteligencia de ubicaciones comerciales en México. "
+                    f"Responde en {'español' if idioma == 'es' else 'English'}, directo y accionable, máximo 150 palabras, "
+                    "con bullets cortos cuando ayude. Usa SOLO los datos del análisis; no inventes cifras. "
+                    "Si preguntan por algo que no está en los datos, dilo."
+                    + (f" Estos módulos NO están incluidos en el plan del usuario: {', '.join(bloqueados)}. "
+                       "Si preguntan por ellos, explica brevemente que están disponibles en un plan superior, sin estimarlos."
+                       if bloqueados else "")
+                    + f"\n\nDATOS DEL ANÁLISIS (JSON):\n{contexto}"
                 )
-        for m in msgs:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
+                with st.chat_message("assistant", avatar=AVATAR_AGENTE):
+                    with st.spinner("Analizando…"):
+                        try:
+                            r = claude.messages.create(
+                                model=modelo, max_tokens=600, system=system,
+                                messages=[{"role": m["role"], "content": m["content"]} for m in msgs[-10:]],
+                            )
+                            resp = r.content[0].text
+                        except Exception as e:
+                            resp = f"No pude responder en este momento ({e})."
+                    st.markdown(resp)
+                msgs.append({"role": "assistant", "content": resp})
 
-        if prompt:
-            msgs.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            contexto, bloqueados = _contexto_agente(data)
-            system = (
-                "Eres el Agente 4SITE, analista senior de inteligencia de ubicaciones comerciales en México. "
-                f"Responde en {'español' if idioma == 'es' else 'English'}, directo y accionable, máximo 150 palabras, "
-                "con bullets cortos cuando ayude. Usa SOLO los datos del análisis; no inventes cifras. "
-                "Si preguntan por algo que no está en los datos, dilo."
-                + (f" Estos módulos NO están incluidos en el plan del usuario: {', '.join(bloqueados)}. "
-                   "Si preguntan por ellos, explica brevemente que están disponibles en un plan superior, sin estimarlos."
-                   if bloqueados else "")
-                + f"\n\nDATOS DEL ANÁLISIS (JSON):\n{contexto}"
-            )
-            with st.chat_message("assistant"):
-                with st.spinner("Analizando…"):
-                    try:
-                        r = claude.messages.create(
-                            model=modelo, max_tokens=600, system=system,
-                            messages=[{"role": m["role"], "content": m["content"]} for m in msgs[-10:]],
-                        )
-                        resp = r.content[0].text
-                    except Exception as e:
-                        resp = f"No pude responder en este momento ({e})."
-                st.markdown(resp)
-            msgs.append({"role": "assistant", "content": resp})
+    _pintar_head(max(limite - sum(1 for m in msgs if m["role"] == "user"), 0))
+    with st.expander("🔎 Cómo se hizo este análisis"):
+        st.markdown(_pasos_html(data), unsafe_allow_html=True)
+    st.caption("La IA puede cometer errores. Verifica la información importante en campo.")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -985,7 +1006,7 @@ const $ = id => document.getElementById(id);
 const fmt = n => (n==null||isNaN(n)) ? '—' : Number(n).toLocaleString('es-MX',{maximumFractionDigits:0});
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const scoreColor = s => s>=65 ? '#1F9D57' : s>=50 ? '#D98A1F' : '#E0524A';
-const CAT = {mercado_probado:['Mercado probado','#1F9D57'], moderada:['Competencia moderada','#2A6FDB'], virgen:['Zona virgen','#8E6CD9'], saturada:['Saturada','#E0524A']};
+const CAT = {mercado_probado:['Ya hay clientes','#1F9D57'], moderada:['Competencia normal','#2A6FDB'], virgen:['Sin competencia','#8E6CD9'], saturada:['Demasiada competencia','#E0524A'], baja_densidad:['Vive poca gente','#93A0AF']};
 const ramp = s => { const t=Math.max(0,Math.min(1,(s-30)/60)); const a=[224,82,74], b=[217,138,31], c=[31,157,87];
   const m = t<.5 ? a.map((v,i)=>v+(b[i]-v)*t*2) : b.map((v,i)=>v+(c[i]-v)*(t-.5)*2); return `rgb(${m.map(Math.round).join(',')})`; };
 const Z = D.zonas||[], C = D.celdas||[];
@@ -1011,13 +1032,13 @@ $('h-tier').textContent = 'Plan ' + D.tier_nombre;
              ['Competidores',D.n_competidores,'únicos en el radio'],['Consultas Google',D.llamadas,'en esta búsqueda']];
   $('kpis').innerHTML = k.map(x=>`<div class="kpi"><div class="k">${x[0]}</div><div class="v">${fmt(x[1])}</div><div class="n">${x[2]}</div></div>`).join('');
   $('cats').innerHTML = Object.entries(CAT).map(([key,[l,col]])=>`<div class="cat"><i style="background:${col}"></i><span>${l}</span><b>${cnt(key)}</b></div>`).join('');
-  $('metodo').innerHTML = `El <b>índice</b> es la misma suma de factores sin tope de 100: ordena las zonas cuando varias llegan al máximo. Dividimos ${D.radio_km} km en 19 hexágonos. En cada uno medimos la competencia (densidad normalizada a 500 m, calidad y consolidación) y le sumamos un bono según el tipo de mercado. A las ${Z.length} mejores les agregamos NSE/ingreso del municipio y colonia (INEGI) y el tipo de vialidad para este giro. Los hexágonos claros son preliminares.`;
+  $('metodo').innerHTML = `Dividimos ${D.radio_km} km en 19 hexágonos. En cada uno medimos la competencia (densidad normalizada a 500 m, calidad y consolidación) y le sumamos un bono según el tipo de mercado. A las ${Z.length} mejores les agregamos NSE/ingreso del municipio y colonia (INEGI) y el tipo de vialidad para este giro. Los hexágonos claros son preliminares.`;
 })();
 
 /* mapa */
 const map = L.map('map',{zoomControl:false}).setView([D.lat,D.lng],13);
 L.control.zoom({position:'bottomright'}).addTo(map); L.control.scale({position:'bottomright',imperial:false}).addTo(map);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{attribution:'© OpenStreetMap © CARTO',subdomains:'abcd',maxZoom:20}).addTo(map);
+addBase(map);
 L.marker([D.lat,D.lng],{icon:L.divIcon({className:'',html:'<div class="site-pin">★</div>',iconSize:[22,22],iconAnchor:[11,11]}),zIndexOffset:1000}).bindPopup('<b>Tu punto de referencia</b><br>'+esc(D.ubicacion)).addTo(map);
 const G = {radio: L.layerGroup([L.circle([D.lat,D.lng],{radius:D.radio_km*1000,color:'#13243B',weight:1.2,dashArray:'6 6',fill:false})]), hex: L.layerGroup(), top: L.layerGroup(), comp: L.layerGroup()};
 let colorMode = 'score';
@@ -1059,8 +1080,8 @@ setTimeout(()=>{map.invalidateSize();fit();},300);
 })();
 
 /* tabla */
-$('tbl').innerHTML = '<tr><th>#</th><th>Zona</th><th>Score</th><th title="Suma de factores sin tope de 100; desempata zonas con el mismo score">Índice</th><th>Mercado</th><th>Comp.</th><th>NSE</th><th>Vialidad</th><th>Dist.</th></tr>' +
-  Z.map((z,i)=>`<tr data-i="${i}"><td><b>${i+1}</b></td><td class="nm">${esc(z.nombre)}</td><td><b style="color:${scoreColor(z.score)}">${z.score}</b></td><td style="color:#5C6B7A">${Math.round(z.indice)}</td>
+$('tbl').innerHTML = '<tr><th>#</th><th>Zona</th><th>Score</th><th>Población</th><th>Mercado</th><th>Comp.</th><th>NSE</th><th>Vialidad</th><th>Dist.</th></tr>' +
+  Z.map((z,i)=>`<tr data-i="${i}"><td><b>${i+1}</b></td><td class="nm">${esc(z.nombre)}</td><td><b style="color:${scoreColor(z.score)}">${z.score}</b></td><td style="color:#5C6B7A">${({alta:'Alta',media:'Media',baja:'Baja'})[z.actividad]||'—'}</td>
     <td><span class="tag" style="background:${CAT[z.categoria][1]}1F;color:${CAT[z.categoria][1]}">${CAT[z.categoria][0]}</span></td>
     <td>${z.n_comp}${z.tope?'+':''}</td><td>${esc(z.nse)}</td><td>${esc((z.vial||{}).badge||'—')}</td><td>${z.dist_km} km</td></tr>`).join('') +
   (D.zonas_ocultas ? `<tr><td colspan="9" style="color:#2A6FDB;font-weight:700">🔒 ${D.zonas_ocultas} zonas detalladas más en Premium</td></tr>` : '');

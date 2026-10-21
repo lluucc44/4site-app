@@ -140,7 +140,7 @@ header[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecor
 .ag-vt {font:700 15px Montserrat, sans-serif; margin:0 0 2px;}
 .ag-vs {font-size:13px; color:var(--muted); margin:0;}
 .ag-pc {display:grid; gap:5px; font-size:13px; margin-top:10px; color:var(--ink);}
-.ag-pc div {display:grid; grid-template-columns:16px 1fr; gap:6px;}
+.ag-pc > div {display:grid; grid-template-columns:16px 1fr; gap:6px;}
 .ag-pc .p {color:var(--ok); font-weight:700;} .ag-pc .c {color:var(--bad); font-weight:700;}
 .ag-lock {font-size:12.5px; color:var(--muted); background:var(--wash); border-radius:10px; padding:8px 10px; margin-top:8px;}
 .st-key-agentpanel p.ag-note {font-size:11.5px !important; color:var(--faint) !important; text-align:center; margin-top:6px;}
@@ -186,7 +186,7 @@ def bloque_usuario(texto: str) -> str:
 def bloque_ruta(pasos, titulo=None) -> str:
     """pasos: lista de (texto, hecho_bool)."""
     n = sum(1 for _, ok in pasos if ok)
-    items = "".join(f"<div class='{'' if ok else 'off'}'>{_esc(t)}{'' if ok else ' · plan superior'}</div>" for t, ok in pasos)
+    items = "".join(f"<div class='{'' if ok else 'off'}'>{_esc(t)}{'' if ok else ' · en un plan superior'}</div>" for t, ok in pasos)
     return (f"<details class='ag-log' open><summary>{_esc(titulo or f'Revisé {n} fuentes')}"
             f"<span style='color:var(--ok)'>✓ listo</span></summary><div class='ag-route'>{items}</div></details>")
 
@@ -211,7 +211,7 @@ def bloque_veredicto(data: dict) -> str:
     if len(sub) > 220:
         sub = sub[:217].rsplit(" ", 1)[0] + "…"
     if data.get("modo") == "recomendar" and data.get("giros"):
-        titulo = f"Mejor opción: {data['giros'][0]['nombre']}"
+        titulo = f"Lo que más te conviene: {data['giros'][0]['nombre']}"
         col = _color_score(s)
     ring = (f"<div class='ag-ring' style='background:conic-gradient({_color_score(s)} 0 {s}%, #E6EBF1 0)'>"
             f"<span>{s}</span></div>")
@@ -222,8 +222,8 @@ def bloque_veredicto(data: dict) -> str:
     if locks.get("diag_parcial"):
         if pros:
             pc += f"<div><span class='p'>+</span><span>{_esc(pros[0])}</span></div>"
-        pc_lock = ("<div class='ag-lock'>🔒 Los riesgos, el resto de las ventajas y la recomendación completa "
-                   "están en el plan Básico.</div>")
+        pc_lock = ("<div class='ag-lock'>🔒 Para ver los riesgos, todas las ventajas y mi recomendación completa, "
+                   "necesitas el plan Básico.</div>")
     else:
         pc += "".join(f"<div><span class='p'>+</span><span>{_esc(x)}</span></div>" for x in pros[:2])
         pc += "".join(f"<div><span class='c'>−</span><span>{_esc(x)}</span></div>" for x in cons[:2])
@@ -240,13 +240,27 @@ def bloque_agente_zonas(data: dict) -> str:
     s = int(top.get("score") or 0)
     ring = (f"<div class='ag-ring' style='background:conic-gradient({_color_score(s)} 0 {s}%, #E6EBF1 0)'>"
             f"<span>{s if zonas else '—'}</span></div>")
-    filas = "".join(f"<div><span class='p'>›</span><span><b>{_esc(r['t'])}:</b> {_esc(r['v'])}</span></div>"
+    filas = "".join(f"<div><span class='{'c' if 'nodo' in r['t'].lower() or 'evitar' in r['t'].lower() else 'p'}'>›</span>"
+                    f"<span><b>{_esc(r['t'])}:</b> {_esc(r['v'])}</span></div>"
                     for r in (data.get("agente") or []))
+    nodos = data.get("nodos") or []
+    if nodos:
+        lista = "".join(f"<div><span class='c'>●</span><span><b>{_esc(n['nombre'])}</b>: "
+                        f"{n['n']} negocios como el tuyo juntos</span></div>" for n in nodos)
+        ext_min = min(n["extra_min"] for n in nodos)
+        ext_max = max(n["extra_max"] for n in nodos)
+        caja_nodos = (f"<div class='ag-lock' style='background:#FDF1F0;color:#7A2B25;margin-top:10px'>"
+                  f"<b>⚠ Aquí se junta la competencia</b><div class='ag-pc' style='margin-top:6px'>{lista}</div>"
+                  f"<p style='margin:6px 0 0;font-size:12.5px'>Hay clientes, pero ya tienen a dónde ir. Si abres ahí, ofrece algo "
+                  f"distinto y ten redes sociales desde el primer día. Aparta de ${ext_min:,.0f} a ${ext_max:,.0f} más de lo normal "
+                  f"para tu marca y publicidad (es una guía, no una cotización).</p></div>")
+    else:
+        caja_nodos = ""
     return (f"<div class='ag-verdict'><div class='ag-pin'>{PIN_SVG}</div><div>"
             f"<div class='ag-vrow'>{ring}<div><p class='ag-vt' style='color:var(--navy)'>"
             f"{_esc(top.get('nombre', 'Sin zonas detalladas'))}</p>"
-            f"<p class='ag-vs'>Mejor zona de {len(data.get('celdas') or [])} evaluadas en {data.get('radio_km')} km</p></div></div>"
-            + (f"<div class='ag-pc'>{filas}</div>" if filas else "") + "</div></div>")
+            f"<p class='ag-vs'>La mejor de {len(data.get('celdas') or [])} zonas que revisé a {data.get('radio_km')} km</p></div></div>"
+            + (f"<div class='ag-pc'>{filas}</div>" if filas else "") + caja_nodos + "</div></div>")
 
 
 def bloque_maphint(titulo: str, texto: str) -> str:
@@ -343,9 +357,9 @@ button{font:inherit;color:inherit;cursor:pointer}
 .kp{display:grid;grid-template-columns:1fr 1fr}
 .kp div{padding:9px 14px;border-bottom:1px solid var(--line);position:relative;min-width:0}
 .kp div:nth-child(odd){border-right:1px solid var(--line)}
-.kp small{display:block;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kp small{display:block;font-size:11.5px;color:var(--muted);line-height:1.3}
 .kp b{font:700 15px Montserrat;color:var(--navy);white-space:nowrap}
-.kp em{display:block;font-style:normal;font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kp em{display:block;font-style:normal;font-size:11px;color:var(--faint);line-height:1.3}
 .kp .lk b{filter:blur(4px);user-select:none}
 .kp .lk small:after{content:" · " attr(data-plan);color:var(--blue)}
 .bars{padding:10px 14px;display:grid;gap:8px;border-bottom:1px solid var(--line)}
@@ -440,11 +454,11 @@ _SITIO_BODY = r"""<body>
 <div class="chips" id="chips"></div>
 <div class="toast" id="toast" role="status"></div>
 <section class="panel profile" id="profile" aria-label="Perfil del sitio">
-  <header><div><h3>Perfil del sitio</h3><div class="sub" id="p-sub"></div></div><button class="mini" id="p-min" aria-label="Minimizar">–</button></header>
+  <header><div><h3>Resumen de tu ubicación</h3><div class="sub" id="p-sub"></div></div><button class="mini" id="p-min" aria-label="Minimizar">–</button></header>
   <div class="body" id="p-body"></div>
 </section>
 <section class="panel drawer" id="drawer" aria-label="Detalle del análisis">
-  <div class="tabs"><button data-t="trafico" class="on">Tráfico</button><button data-t="comp">Competidores</button><button data-t="demo">Demografía</button><button data-t="dinero">Dinero</button><button data-t="interp">Interpretación</button><button class="mini" id="d-min" aria-label="Minimizar">–</button></div>
+  <div class="tabs"><button data-t="trafico" class="on">¿Cuándo pasa gente?</button><button data-t="comp">Competencia</button><button data-t="demo">¿Quién vive aquí?</button><button data-t="dinero">Números</button><button data-t="interp">Explicación completa</button><button class="mini" id="d-min" aria-label="Minimizar">–</button></div>
   <div class="in" id="d-in"></div>
 </section>
 <div class="legend" id="legend"></div>
@@ -464,8 +478,8 @@ L.marker([D.lat,D.lng],{icon:L.divIcon({className:'',html:'<div class="site-pin"
 const fit=()=>{ const w=map.getSize().x; map.fitBounds(L.latLng(D.lat,D.lng).toBounds((D.radio_m||500)*2.3),{paddingTopLeft:[w>760?340:20,60],paddingBottomRight:[20,map.getSize().y*0.42]}); };
 const G={radio:L.layerGroup([L.circle([D.lat,D.lng],{radius:D.radio_m||500,color:'#2A6FDB',weight:2,dashArray:'6 6',fillColor:'#2A6FDB',fillOpacity:.05})]),
          comp:L.layerGroup(),heat:L.layerGroup(),iso:L.layerGroup(),
-         cani:L.layerGroup([L.circle([D.lat,D.lng],{radius:150,color:'#D9493F',weight:2,dashArray:'4 4',fillColor:'#D9493F',fillOpacity:.08}).bindTooltip('Zona crítica: 150 m'),
-                            L.circle([D.lat,D.lng],{radius:300,color:'#D3871B',weight:1.5,dashArray:'4 4',fill:false}).bindTooltip('Zona de influencia: 300 m')])};
+         cani:L.layerGroup([L.circle([D.lat,D.lng],{radius:150,color:'#D9493F',weight:2,dashArray:'4 4',fillColor:'#D9493F',fillOpacity:.08}).bindTooltip('A menos de 150 m: te quitan clientes directamente'),
+                            L.circle([D.lat,D.lng],{radius:300,color:'#D3871B',weight:1.5,dashArray:'4 4',fill:false}).bindTooltip('A menos de 300 m: compiten por los mismos clientes')])};
 const compMk=[];
 function drawComp(){
   G.comp.clearLayers();G.heat.clearLayers();compMk.length=0;
@@ -479,12 +493,12 @@ function drawIso(){
   G.iso.clearLayers(); const cols=['#1E9A5A','#D3871B','#D9493F'];
   if(isoMode==='walk'&&D.isocronas&&D.isocronas.features){
     [...D.isocronas.features].sort((a,b)=>(b.properties.value||0)-(a.properties.value||0)).forEach((f,i,arr)=>{const k=arr.length-1-i;
-      L.geoJSON(f,{style:{color:cols[k]||'#2A6FDB',weight:1.5,fillOpacity:.07}}).bindTooltip(`${Math.round((f.properties.value||0)/60)} min a pie`).addTo(G.iso);});
+      L.geoJSON(f,{style:{color:cols[k]||'#2A6FDB',weight:1.5,fillOpacity:.07}}).bindTooltip(`Llegas en ${Math.round((f.properties.value||0)/60)} min caminando`).addTo(G.iso);});
   } else { const r=isoMode==='walk'?[400,800,1200]:[1500,3000,4500];
-    [2,1,0].forEach(k=>L.circle([D.lat,D.lng],{radius:r[k],color:cols[k],weight:1.5,fillColor:cols[k],fillOpacity:.05}).bindTooltip(`${[5,10,15][k]} min ${isoMode==='walk'?'a pie':'en auto'} (aprox.)`).addTo(G.iso)); }
+    [2,1,0].forEach(k=>L.circle([D.lat,D.lng],{radius:r[k],color:cols[k],weight:1.5,fillColor:cols[k],fillOpacity:.05}).bindTooltip(`Llegas en ${[5,10,15][k]} min ${isoMode==='walk'?'caminando':'en auto'} (aprox.)`).addTo(G.iso)); }
 }
-const LAY=[{k:'radio',l:`Radio ${fmt(D.radio_m)} m`,on:true},{k:'comp',l:'Competidores',on:!L_.comp_mapa,lock:L_.comp_mapa},
-           {k:'iso',l:'Isócronas',on:false,lock:L_.mapa_avanzado},{k:'heat',l:'Calor',on:false,lock:L_.mapa_avanzado},{k:'cani',l:'Canibalización',on:false,lock:L_.mapa_avanzado}];
+const LAY=[{k:'radio',l:`Área de ${fmt(D.radio_m)} m`,on:true},{k:'comp',l:'Competencia',on:!L_.comp_mapa,lock:L_.comp_mapa},
+           {k:'iso',l:'Hasta dónde llegas',on:false,lock:L_.mapa_avanzado},{k:'heat',l:'Dónde se junta',on:false,lock:L_.mapa_avanzado},{k:'cani',l:'Demasiado cerca',on:false,lock:L_.mapa_avanzado}];
 function sync(){LAY.forEach(x=>{(x.on&&!x.lock)?G[x.k].addTo(map):map.removeLayer(G[x.k]);});}
 function chips(){
   const iso=LAY.find(x=>x.k==='iso');
@@ -494,30 +508,31 @@ function chips(){
   document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{isoMode=b.dataset.m;drawIso();chips();if(isoMode==='car')map.setView([D.lat,D.lng],13);else fit();});
 }
 drawComp();drawIso();sync();chips();
-$('legend').innerHTML=`<div><i style="background:#F2B705;box-shadow:0 0 0 2px #13243B"></i>Tu ubicación</div>`+(L_.comp_mapa?'':`<div><i style="background:#1E9A5A"></i>Competidor 4.3★ o más</div><div><i style="background:#D3871B"></i>3.5 a 4.2★</div><div><i style="background:#D9493F"></i>Menos de 3.5★</div>`);
+$('legend').innerHTML=`<div><i style="background:#F2B705;box-shadow:0 0 0 2px #13243B"></i>Tu ubicación</div>`+(L_.comp_mapa?'':`<div><i style="background:#1E9A5A"></i>Competidor muy bien calificado</div><div><i style="background:#D3871B"></i>Calificación regular</div><div><i style="background:#D9493F"></i>Mal calificado</div>`);
 
 /* ── perfil del sitio ── */
 function drawProfile(){
-  $('p-sub').textContent=`${D.tipo_nombre||''} · radio ${fmt(D.radio_m)} m`;
+  $('p-sub').textContent=`${D.tipo_nombre||''} · ${fmt(D.radio_m)} m a la redonda`;
   const s=Math.round(D.score||0);
-  let h=`<div class="scorebar">${ring(s)}<div style="flex:1;min-width:0"><b style="color:${scoreColor(s)}">${esc(D.nivel||'')}</b><small>Score de viabilidad de 0 a 100</small>`;
+  let h=`<div class="scorebar">${ring(s)}<div style="flex:1;min-width:0"><b style="color:${scoreColor(s)}">${s>=65?'Buena ubicación':s>=50?'Con cuidado':'No conviene'}</b><small>Calificación de 0 a 100. Más de 65 es buena.</small>`;
   if((D.giros||[]).length) h+=`<select class="giro-sel" id="giro" aria-label="Giro">${D.giros.map((g,i)=>`<option value="${i}" ${i===giroSel?'selected':''}>${i+1}. ${esc(g.nombre)} · ${g.score}</option>`).join('')}</select>`;
   h+=`</div></div>`;
   if(D.giros&&D.giros[giroSel]&&(D.giros[giroSel].por_que||[]).length){
-    h+=`<div class="pal" style="border-bottom:1px solid var(--line)"><h4>Por qué este giro</h4>${D.giros[giroSel].por_que.map(w=>`<div><span>${esc(w.t)}</span><b style="color:${w.s==='+'?'#1E9A5A':'#D9493F'}">${w.s}</b></div>`).join('')}</div>`;}
+    h+=`<div class="pal" style="border-bottom:1px solid var(--line)"><h4>Por qué este negocio</h4>${D.giros[giroSel].por_que.map(w=>`<div><span>${esc(w.t)}</span><b style="color:${w.s==='+'?'#1E9A5A':'#D9493F'}">${w.s}</b></div>`).join('')}</div>`;}
   h+='<div class="kp">'+(D.kpis||[]).slice(0,8).map(k=>`<div class="${k.lock?'lk':''}"><small data-plan="${k.lock||''}">${esc(k.k)}</small><b>${k.lock?'$00,000':esc(k.v)}</b>${k.n&&!k.lock?`<em>${esc(k.n)}</em>`:''}</div>`).join('')+'</div>';
-  const b=D.desglose||{}, rows=[['Competencia cercana','densidad'],['Calidad de la competencia','calidad'],['Mercado consolidado','consolidacion']];
+  const b=D.desglose||{}, rows=[['Poca competencia alrededor','densidad'],['Competencia fácil de superar','calidad'],['Clientes que aún no tienen favorito','consolidacion']];
   const bars=`<div class="bars">${rows.map(([l,k])=>{const v=b[k]||0;return `<div>${l}<span>${L_.desglose?'00':v}</span><div class="t"><i style="width:${L_.desglose?60:v}%;background:${L_.desglose?'#2A6FDB':scoreColor(v)}"></i></div></div>`;}).join('')}</div>`;
-  h+= L_.desglose ? `<div class="blur">${bars}</div><div class="lockline">🔒 Desglose del score en <b>plan Básico</b></div>` : bars;
+  const barsTxt=`<div class="lockline" style="border-bottom:0;padding-bottom:0">De qué depende tu calificación (barra más llena = mejor para ti)</div>`;
+  h+= L_.desglose ? `<div class="blur">${bars}</div><div class="lockline">🔒 De qué depende tu calificación: <b>plan Básico</b></div>` : barsTxt+bars;
   (D.ajustes||[]).forEach(a=>{h+=`<div class="lockline" style="display:flex;justify-content:space-between"><span>${esc(a.l)}</span><b style="color:${a.v>0?'#1E9A5A':'#D9493F'}">${a.v>0?'+':''}${a.v} pts</b></div>`;});
-  if((D.palancas||[]).length) h+=`<div class="pal"><h4>Qué subiría el score</h4>${D.palancas.map(p=>`<div><span>${esc(p.l)}</span><b>+${p.v} pts</b></div>`).join('')}</div>`;
+  if((D.palancas||[]).length) h+=`<div class="pal"><h4>Qué mejoraría tu calificación</h4>${D.palancas.map(p=>`<div><span>${esc(p.l)}</span><b>+${p.v} pts</b></div>`).join('')}</div>`;
   $('p-body').innerHTML=h;
   const gs=$('giro'); if(gs) gs.onchange=()=>selectGiro(+gs.value);
 }
 function selectGiro(i){const g=D.giros[i];if(!g)return;giroSel=i;
   Object.assign(D,{score:g.score,nivel:g.nivel,tipo_nombre:g.nombre,desglose:g.desglose,competidores:g.competidores,n_competidores:g.n_competidores});
   drawComp();sync();drawProfile();if(curTab==='comp')drawTab('comp');
-  if(i>0) toast('Mapa y score de este giro. Mercado y tráfico corresponden al giro #1.');}
+  if(i>0) toast('Mapa y calificación de este negocio. Ventas y gente que pasa son del negocio #1.');}
 $('p-min').onclick=()=>{const p=$('profile');p.classList.toggle('min');$('p-min').textContent=p.classList.contains('min')?'+':'–';};
 
 /* ── cajón de detalle ── */
@@ -526,17 +541,17 @@ function drawTab(t){
   curTab=t; const el=$('d-in'); let h='';
   if(t==='trafico'){
     const T=D.trafico;
-    if(!T){h='<p class="cap">Sin datos de tráfico para este análisis.</p>';}
+    if(!T){h='<p class="cap">No tengo datos de cuánta gente pasa para este análisis.</p>';}
     else{
       const fr=[['Mañana',6,11],['Mediodía',12,15],['Tarde',16,19],['Noche',20,23],['Madrug.',0,5]],dias=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'],H=T.horario||[],S=T.semanal||[];
       const vals=dias.map((d,i)=>fr.map(([n,a,b])=>{let s=0,c=0;for(let x=a;x<=b;x++){s+=H[x]||0;c++;}return (S[i]||0)/100*s/c;}));
       const mx=Math.max(1,...vals.flat()),col=v=>{const q=v/mx;return q>.75?'#13243B':q>.55?'#2A6FDB':q>.35?'#7FA9EE':q>.18?'#C9DBF8':'#EEF3FB';};
       let hm='<div class="hm"><div></div>'+fr.map(f=>`<div class="h">${f[0]}</div>`).join('');
       dias.forEach((d,i)=>{hm+=`<div class="d">${d}</div>`+vals[i].map(v=>`<div class="c" title="${Math.round(v/mx*100)}" style="background:${col(v)}"></div>`).join('');});
-      hm+=`</div><p class="cap">Día con más flujo: <b>${esc(T.dia_pico||'—')}</b>. Más oscuro, más gente.</p>`;
+      hm+=`</div><p class="cap">El día con más gente: <b>${esc(T.dia_pico||'—')}</b>. Color más oscuro = pasa más gente.</p>`;
       const hx=Math.max(1,...H);
       let hb=`<div class="hours">${H.map((v,i)=>`<i title="${i}:00 · ${v}%" style="height:${v/hx*100}%;opacity:${v>=70?1:.45}"></i>`).join('')}</div><div class="ax"><span>0 h</span><span>6 h</span><span>12 h</span><span>18 h</span><span>23 h</span></div>`;
-      hb+=`<p class="cap">Horas pico: ${(T.picos||[]).map(esc).join(', ')||'—'}</p>`;
+      hb+=`<p class="cap">Horas con más gente: ${(T.picos||[]).map(esc).join(', ')||'—'}</p>`;
       const inner=`<div class="cols"><div>${hm}</div><div>${hb}</div></div>`;
       h=L_.trafico?locked(inner,'PRO'):inner;
     }
@@ -544,26 +559,26 @@ function drawTab(t){
   if(t==='comp'){
     const cs=D.competidores||[],nS=D.comp_visibles||cs.length;
     const n150=cs.filter(c=>c.dist<=150).length;
-    h=`<p class="cap" style="margin:0 0 8px">${D.n_competidores}${D.n_competidores>=20?'+':''} competidores en ${fmt(D.radio_m)} m${D.radio_m!==500&&D.equiv_500!=null?` (≈${D.equiv_500} por cada 500 m)`:''}${n150?` · <b style="color:#D9493F">${n150} a menos de 150 m</b>`:''}. Toca uno para verlo en el mapa.</p>`;
+    h=`<p class="cap" style="margin:0 0 8px">Hay ${D.n_competidores}${D.n_competidores>=20?'+':''} negocios como el tuyo a ${fmt(D.radio_m)} m${n150?` · <b style="color:#D9493F">${n150} a menos de 150 m, casi enfrente</b>`:''}. Toca uno para verlo en el mapa.</p>`;
     h+=cs.length?`<div class="clist">${cs.slice(0,nS).map((c,i)=>`<button class="cp" data-i="${i}"><div class="num-pin" style="background:${ratingColor(c.rating)}">${i+1}</div><div style="min-width:0"><div class="nm">${esc(c.nombre)}</div><div class="mt">${fmt(c.dist)} m · ${fmt(c.reviews)} reseñas</div></div><div class="rt" style="color:${ratingColor(c.rating)}">${c.rating?c.rating.toFixed(1):'—'}★</div></button>`).join('')}</div>`:'<p class="cap">No encontré competidores directos en el radio.</p>';
     if(cs.length>nS) h+=`<p class="cap">🔒 ${cs.length-nS} competidores más en un plan superior.</p>`;
   }
   if(t==='demo'){
     const E=D.demo||{},ed=E.edad||{},rows=[['0-17','0 a 17'],['18-35','18 a 35'],['36-55','36 a 55'],['56+','56 o más']],mx=Math.max(1,...rows.map(r=>ed[r[0]]||0));
-    const inner=`<div class="cols"><div><div class="nse">${esc(E.nse||'—')}</div><p class="cap" style="margin-top:2px">Nivel socioeconómico predominante · ingreso por hogar ${E.ingreso?'$'+fmt(E.ingreso):'—'} al mes${E.mujeres?` · ${E.mujeres}% mujeres`:''}</p></div>
+    const inner=`<div class="cols"><div><div class="nse">${esc(E.nse||'—')}</div><p class="cap" style="margin-top:2px">Nivel de ingresos que más hay en la zona (A/B alto, C medio, D bajo). Cada familia gana unos ${E.ingreso?'$'+fmt(E.ingreso):'—'} al mes${E.mujeres?` · ${E.mujeres}% son mujeres`:''}.</p><p class="cap">Edades de la gente que vive cerca:</p></div>
       <div class="age">${rows.map(([k,l])=>`<div class="r"><span>${l}</span><div class="t"><i style="width:${(ed[k]||0)/mx*100}%"></i></div><span>${ed[k]||0}%</span></div>`).join('')}</div></div>`;
     h=L_.demografia?locked(inner,'Básico'):inner;
   }
   if(t==='dinero'){
-    const ks=(D.kpis||[]).filter(k=>/Ticket|Mercado|Clientes|Venta|ROI|Recuper/.test(k.k));
-    h=`<div class="money">${ks.map(k=>`<div class="${k.lock?'lk':''}"><small>${esc(k.k)}${k.lock?' · 🔒 '+k.lock:''}</small><b>${k.lock?'$00,000':esc(k.v)}</b>${k.n&&!k.lock?`<small>${esc(k.n)}</small>`:''}</div>`).join('')}</div><p class="cap">Estimaciones con datos INEGI, competencia y tráfico de la zona. Úsalas como referencia, no como garantía.</p>`;
+    const ks=(D.kpis||[]).filter(k=>/Gasto|Ventas|Clientes|Venta|Ganancia|Recuperas/.test(k.k));
+    h=`<div class="money">${ks.map(k=>`<div class="${k.lock?'lk':''}"><small>${esc(k.k)}${k.lock?' · 🔒 '+k.lock:''}</small><b>${k.lock?'$00,000':esc(k.v)}</b>${k.n&&!k.lock?`<small>${esc(k.n)}</small>`:''}</div>`).join('')}</div><p class="cap">Son cálculos con datos de INEGI, la competencia y la gente que pasa. Tómalos como guía, no como promesa.</p>`;
   }
   if(t==='interp'){
     const sec=s=>`<div class="isec">${s.t?`<h4>${esc(s.t)}</h4>`:''}${(s.p||[]).map(x=>`<p>${esc(x)}</p>`).join('')}${(s.b||[]).length?'<ul>'+s.b.map(x=>`<li>${esc(x)}</li>`).join('')+'</ul>':''}</div>`;
     const S=V.secciones||[],A=D.analisis_secciones||[];
-    h=S.map(sec).join('')+(A.length?`<h4 style="margin:12px 0 4px;color:#2A6FDB">${D.modo==='recomendar'?'Lectura de la zona':'Análisis de competencia'}</h4>`+A.map(sec).join(''):'');
+    h=S.map(sec).join('')+(A.length?`<h4 style="margin:12px 0 4px;color:#2A6FDB">${D.modo==='recomendar'?'Cómo es la zona':'Sobre tu competencia'}</h4>`+A.map(sec).join(''):'');
     if(L_.diag_parcial) h=(S[0]?sec(S[0]):'')+locked(S.slice(1).map(sec).join('')||sec({t:'Interpretación completa',p:['Disponible en el plan Básico.']}),'Básico');
-    if(!h) h='<p class="cap">Sin interpretación disponible.</p>';
+    if(!h) h='<p class="cap">No hay explicación disponible para este análisis.</p>';
   }
   el.innerHTML=h;
   document.querySelectorAll('.cp').forEach(b=>b.onclick=()=>{const i=+b.dataset.i,c=D.competidores[i];
@@ -584,45 +599,50 @@ _ZONAS_BODY = r"""<body>
 <div class="chips" id="chips"></div>
 <div class="toast" id="toast" role="status"></div>
 <section class="panel profile" id="profile" aria-label="Mejores zonas">
-  <header><div><h3>Mejores zonas</h3><div class="sub" id="p-sub"></div></div><button class="mini" id="p-min" aria-label="Minimizar">–</button></header>
+  <header><div><h3>Las mejores zonas para ti</h3><div class="sub" id="p-sub"></div></div><button class="mini" id="p-min" aria-label="Minimizar">–</button></header>
   <div class="body" id="p-body"></div>
 </section>
 <section class="panel drawer" id="drawer" aria-label="Detalle">
-  <div class="tabs"><button data-t="tabla" class="on">Comparativa</button><button data-t="guia">Guía de ubicación</button><button data-t="metodo">Cómo se calcula</button><button class="mini" id="d-min" aria-label="Minimizar">–</button></div>
+  <div class="tabs"><button data-t="tabla" class="on">Comparar zonas</button><button data-t="nodos">Donde se junta la competencia</button><button data-t="guia">Qué buscar en el local</button><button data-t="metodo">Cómo lo calculé</button><button class="mini" id="d-min" aria-label="Minimizar">–</button></div>
   <div class="in" id="d-in"></div>
 </section>
 <div class="legend" id="legend"></div>
 <script>
 const D=__DATA__;
 const Z=D.zonas||[],C=D.celdas||[];
-const CAT={mercado_probado:['Mercado probado','#1E9A5A'],moderada:['Competencia moderada','#2A6FDB'],virgen:['Zona virgen','#8E6CD9'],saturada:['Saturada','#D9493F']};
+const CAT={mercado_probado:['Ya hay clientes','#1E9A5A'],moderada:['Competencia normal','#2A6FDB'],virgen:['Sin competencia','#8E6CD9'],saturada:['Demasiada competencia','#D9493F'],baja_densidad:['Vive poca gente','#93A0AF']};
+const NODOS=D.nodos||[];
+const money=n=>'$'+(n>=1e6?(n/1e6).toFixed(1)+' M':Math.round(n/1e3)+' mil');
 const ramp=s=>{const t=Math.max(0,Math.min(1,(s-30)/60)),a=[217,73,63],b=[211,135,27],c=[30,154,90];const m=t<.5?a.map((v,i)=>v+(b[i]-v)*t*2):b.map((v,i)=>v+(c[i]-v)*(t-.5)*2);return `rgb(${m.map(Math.round).join(',')})`;};
 let sel=0,colorMode='score';
 const map=L.map('map',{zoomControl:false});L.control.zoom({position:'topright'}).addTo(map);L.control.scale({position:'bottomleft',imperial:false}).addTo(map);addBase(map);
 L.marker([D.lat,D.lng],{icon:L.divIcon({className:'',html:'<div class="site-pin"></div>',iconSize:[24,24],iconAnchor:[12,12]}),zIndexOffset:1000}).bindPopup('<b>Tu punto de referencia</b><br>'+esc(D.ubicacion)).addTo(map);
-const G={radio:L.layerGroup([L.circle([D.lat,D.lng],{radius:D.radio_km*1000,color:'#13243B',weight:1.2,dashArray:'6 6',fill:false})]),hex:L.layerGroup(),top:L.layerGroup(),comp:L.layerGroup()};
+const G={radio:L.layerGroup([L.circle([D.lat,D.lng],{radius:D.radio_km*1000,color:'#13243B',weight:1.2,dashArray:'6 6',fill:false})]),hex:L.layerGroup(),top:L.layerGroup(),comp:L.layerGroup(),nodos:L.layerGroup()};
+NODOS.forEach(n=>{L.circle([n.lat,n.lng],{radius:n.radio_m,color:'#D9493F',weight:2,dashArray:'5 5',fillColor:'#D9493F',fillOpacity:.14})
+  .bindTooltip(`<b>Aquí se junta la competencia</b><br>${esc(n.nombre)} · ${n.n} negocios como el tuyo`,{sticky:true}).addTo(G.nodos);
+  L.marker([n.lat,n.lng],{icon:L.divIcon({className:'',html:`<div style="background:#D9493F;color:#fff;font:700 11px 'IBM Plex Sans';border-radius:99px;padding:3px 8px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3);white-space:nowrap">⚠ ${n.n} competidores juntos</div>`,iconSize:[150,22],iconAnchor:[75,11]}),zIndexOffset:800}).on('click',()=>{document.querySelector('#drawer .tabs button[data-t="nodos"]').click();}).addTo(G.nodos);});
 function paint(){G.hex.clearLayers();C.forEach(c=>{const col=colorMode==='score'?ramp(c.score):(CAT[c.categoria]||['','#9AA5B1'])[1];
   L.polygon(c.poly,{color:'#fff',weight:1.5,fillColor:col,fillOpacity:c.detallada?.5:.25,dashArray:c.detallada?null:'3 3'})
-   .bindTooltip(`<b>${c.detallada?esc(c.nombre):'Zona sin detallar'}</b><br>Score ${c.score} · ${(CAT[c.categoria]||[''])[0]}<br>${c.n_comp}${c.tope?'+':''} competidores`,{sticky:true}).addTo(G.hex);});}
+   .bindTooltip(`<b>${c.detallada?esc(c.nombre):'Zona que no revisé a fondo'}</b><br>Calificación ${c.score}/100 · ${(CAT[c.categoria]||[''])[0]}<br>${c.n_comp}${c.tope?'+':''} negocios como el tuyo`,{sticky:true}).addTo(G.hex);});}
 paint();
 const mk=[];Z.forEach((z,i)=>{mk[i]=L.marker([z.lat,z.lng],{icon:L.divIcon({className:'',html:`<div class="num-pin" style="background:#13243B;width:24px;height:24px;font-size:11px">${i+1}</div>`,iconSize:[24,24],iconAnchor:[12,12]}),zIndexOffset:900})
-  .bindPopup(`<b>${i+1}. ${esc(z.nombre)}</b><br>Score <b style="color:${scoreColor(z.score)}">${z.score}</b> · ${(CAT[z.categoria]||[''])[0]}<br>NSE ${esc(z.nse)} · ${z.n_comp} competidores · ${z.dist_km} km de tu referencia`).on('click',()=>pick(i,false)).addTo(G.top);});
+  .bindPopup(`<b>${i+1}. ${esc(z.nombre)}</b><br>Calificación <b style="color:${scoreColor(z.score)}">${z.score}/100</b> · ${(CAT[z.categoria]||[''])[0]}<br>${z.n_comp} negocios como el tuyo · a ${z.dist_km} km del punto que buscaste`).on('click',()=>pick(i,false)).addTo(G.top);});
 (D.competidores||[]).forEach(c=>L.circleMarker([c.lat,c.lng],{radius:3.5,weight:1,color:'#fff',fillColor:ratingColor(c.rating),fillOpacity:.95}).bindTooltip(`${esc(c.nombre)} · ${c.rating?c.rating+'★':'s/c'}`).addTo(G.comp));
-const LAY=[{k:'hex',l:'Zonas',on:true},{k:'top',l:'Mejores zonas',on:true},{k:'comp',l:'Competidores',on:false},{k:'radio',l:`Radio ${D.radio_km} km`,on:true}];
+const LAY=[{k:'hex',l:'Zonas',on:true},{k:'top',l:'Las mejores',on:true},{k:'nodos',l:'Donde se junta la competencia',on:true},{k:'comp',l:'Competencia',on:false},{k:'radio',l:`${D.radio_km} km a la redonda`,on:true}];
 function sync(){LAY.forEach(x=>x.on?G[x.k].addTo(map):map.removeLayer(G[x.k]));}
-function chips(){$('chips').innerHTML=LAY.map(x=>`<button class="chip ${x.on?'on':''}" data-k="${x.k}"><i></i>${x.l}</button>`).join('')+`<span class="seg"><button data-m="score" class="${colorMode==='score'?'on':''}">Color por score</button><button data-m="cat" class="${colorMode==='cat'?'on':''}">Por tipo de mercado</button></span>`;
+function chips(){$('chips').innerHTML=LAY.map(x=>`<button class="chip ${x.on?'on':''}" data-k="${x.k}"><i></i>${x.l}</button>`).join('')+`<span class="seg"><button data-m="score" class="${colorMode==='score'?'on':''}">Color por calificación</button><button data-m="cat" class="${colorMode==='cat'?'on':''}">Color por tipo de zona</button></span>`;
   document.querySelectorAll('.chip').forEach(b=>b.onclick=()=>{const x=LAY.find(y=>y.k===b.dataset.k);x.on=!x.on;sync();chips();});
   document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{colorMode=b.dataset.m;paint();chips();legend();});}
-function legend(){$('legend').innerHTML=colorMode==='score'?`<div><i style="background:#1E9A5A"></i>Score alto</div><div><i style="background:#D3871B"></i>Medio</div><div><i style="background:#D9493F"></i>Bajo</div><div style="color:#93A0AF">Punteado: sin detallar</div>`:Object.values(CAT).map(([l,c])=>`<div><i style="background:${c}"></i>${l}</div>`).join('');}
+function legend(){$('legend').innerHTML=colorMode==='score'?`<div><i style="background:#1E9A5A"></i>Buena zona</div><div><i style="background:#D3871B"></i>Regular</div><div><i style="background:#D9493F"></i>No conviene</div><div style="color:#93A0AF">Punteado: no la revisé a fondo</div>`:Object.values(CAT).map(([l,c])=>`<div><i style="background:${c}"></i>${l}</div>`).join('');}
 sync();chips();legend();
 const fit=()=>{const w=map.getSize().x;map.fitBounds(L.latLng(D.lat,D.lng).toBounds(D.radio_km*2000*1.1),{paddingTopLeft:[w>760?340:20,60],paddingBottomRight:[20,map.getSize().y*0.4]});};
 
 function cards(){
-  $('p-sub').textContent=`${D.tipo_nombre} · ${C.length} zonas evaluadas`;
+  $('p-sub').textContent=`${D.tipo_nombre} · revisé ${C.length} zonas`;
   $('p-body').innerHTML=Z.length?Z.map((z,i)=>`<button class="cp" data-i="${i}" style="border-radius:0;border:0;border-bottom:1px solid var(--line);padding:10px 14px;grid-template-columns:24px 1fr auto;${i===sel?'background:#E8F0FC':''}">
     <div class="num-pin" style="background:#13243B;width:22px;height:22px">${i+1}</div>
-    <div style="min-width:0"><div class="nm">${esc(z.nombre)}</div><div class="mt"><span style="color:${CAT[z.categoria][1]};font-weight:600">${CAT[z.categoria][0]}</span> · NSE ${esc(z.nse)} · ${z.n_comp}${z.tope?'+':''} comp. · ${z.dist_km} km</div>
-    ${i===sel?`<div style="margin-top:6px;display:grid;gap:3px">${(z.por_que||[]).map(w=>`<div style="font-size:11.5px;color:#34465C;display:grid;grid-template-columns:12px 1fr;gap:4px"><b style="color:${w.s==='+'?'#1E9A5A':w.s==='−'?'#D9493F':'#D3871B'}">${w.s==='+'?'+':w.s==='−'?'−':'•'}</b><span>${esc(w.t)}</span></div>`).join('')}</div>`:''}</div>
+    <div style="min-width:0"><div class="nm">${esc(z.nombre)}</div><div class="mt"><span style="color:${CAT[z.categoria][1]};font-weight:600">${CAT[z.categoria][0]}</span>${z.nodo?` · <span style="color:#D9493F;font-weight:600">mucha competencia junta</span>`:''} · ${z.n_comp}${z.tope?'+':''} competidores${z.actividad?' · '+({alta:'vive mucha gente',media:'vive gente',baja:'vive poca gente'})[z.actividad]:''} · a ${z.dist_km} km</div>
+    ${i===sel?`<div style="margin-top:6px;display:grid;gap:3px">${(z.por_que||[]).map(w=>`<div style="font-size:11.5px;color:#34465C;display:grid;grid-template-columns:12px 1fr;gap:4px"><b style="color:${w.s==='+'?'#1E9A5A':w.s==='−'||w.s==='!'?'#D9493F':'#D3871B'}">${w.s==='+'?'+':w.s==='−'?'−':w.s==='!'?'!':'•'}</b><span>${esc(w.t)}</span></div>`).join('')}</div>`:''}</div>
     <div class="rt" style="color:${scoreColor(z.score)};font-size:17px">${z.score}</div></button>`).join(''):'<p class="cap" style="padding:12px 14px">No se pudieron detallar zonas en este radio.</p>';
   document.querySelectorAll('#p-body .cp').forEach(b=>b.onclick=()=>pick(+b.dataset.i,true));
 }
@@ -631,16 +651,25 @@ $('p-min').onclick=()=>{const p=$('profile');p.classList.toggle('min');$('p-min'
 
 let curTab='tabla';
 function drawTab(t){curTab=t;let h='';
-  if(t==='tabla'){h=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr style="text-align:left;color:#5D6B7C;font-size:11.5px"><th style="padding:5px 6px">#</th><th style="padding:5px 6px">Zona</th><th style="padding:5px 6px">Score</th><th style="padding:5px 6px" title="Suma de factores sin tope; desempata">Índice</th><th style="padding:5px 6px">Mercado</th><th style="padding:5px 6px">Comp.</th><th style="padding:5px 6px">NSE</th><th style="padding:5px 6px">Vialidad</th><th style="padding:5px 6px">Distancia</th></tr>`+
-    Z.map((z,i)=>`<tr data-i="${i}" style="cursor:pointer;border-top:1px solid #F0F3F7;${i===sel?'background:#E8F0FC':''}"><td style="padding:6px"><b>${i+1}</b></td><td style="padding:6px;font-weight:600">${esc(z.nombre)}</td><td style="padding:6px;font-weight:700;color:${scoreColor(z.score)}">${z.score}</td><td style="padding:6px;color:#5D6B7C">${Math.round(z.indice||0)}</td><td style="padding:6px;color:${CAT[z.categoria][1]}">${CAT[z.categoria][0]}</td><td style="padding:6px">${z.n_comp}${z.tope?'+':''}</td><td style="padding:6px">${esc(z.nse)}</td><td style="padding:6px">${esc((z.vial||{}).badge||'—')}</td><td style="padding:6px">${z.dist_km} km</td></tr>`).join('')+'</table></div>';}
-  if(t==='guia'){const z=Z[sel]||{},r=z.recom||{};const it=[['Vialidad ideal',r.vialidad_ideal],['Visibilidad',r.visibilidad],['Estacionamiento',r.estacionamiento],['En plaza comercial',r.plaza_recomendacion],['Competidor de referencia',r.ref_competidor],['Para este nivel socioeconómico',r.tip_nse]].filter(x=>x[1]);
-    h=`<p class="cap" style="margin:0 0 6px">Para la zona ${sel+1}: <b>${esc(z.nombre||'')}</b></p>`+it.map(([a,b])=>`<div class="isec"><h4>${a}</h4><p>${esc(b)}</p></div>`).join('');}
-  if(t==='metodo'){h=`<div class="isec"><p>Dividí ${D.radio_km} km alrededor de tu referencia en ${C.length} zonas hexagonales de unos ${fmt((D.hex_m||0)*2)} m. En cada una medí la competencia de tu giro (cuántos hay, qué tan bien calificados y qué tan consolidados) y sumé un ajuste según el tipo de mercado.</p></div>
-    <div class="isec"><p>A las ${Z.length} mejores les agregué el nivel socioeconómico de la colonia y municipio (INEGI) y el tipo de calle, calculado para tu giro. Las zonas punteadas no se detallaron.</p></div>
-    <div class="isec"><p><b>Mercado probado:</b> hay un competidor bien calificado sin saturación, la demanda existe. <b>Zona virgen:</b> sin competencia, la demanda está por validarse. <b>Saturada:</b> demasiados competidores para tu giro. El <b>índice</b> ordena zonas que empatan en 100.</p></div>
-    <p class="cap">${D.llamadas} consultas a Google en esta búsqueda.</p>`;}
+  if(t==='tabla'){h=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><tr style="text-align:left;color:#5D6B7C;font-size:11.5px"><th style="padding:5px 6px">#</th><th style="padding:5px 6px">Zona</th><th style="padding:5px 6px">Calificación</th><th style="padding:5px 6px">¿Vive gente?</th><th style="padding:5px 6px">Tipo de zona</th><th style="padding:5px 6px">Competidores</th><th style="padding:5px 6px">Ingresos</th><th style="padding:5px 6px">Calle</th><th style="padding:5px 6px">Distancia</th></tr>`+
+    Z.map((z,i)=>`<tr data-i="${i}" style="cursor:pointer;border-top:1px solid #F0F3F7;${i===sel?'background:#E8F0FC':''}"><td style="padding:6px"><b>${i+1}</b></td><td style="padding:6px;font-weight:600">${esc(z.nombre)}</td><td style="padding:6px;font-weight:700;color:${scoreColor(z.score)}">${z.score}</td><td style="padding:6px">${({alta:'Mucha',media:'Algo',baja:'Poca'})[z.actividad]||'—'}</td><td style="padding:6px;color:${CAT[z.categoria][1]}">${CAT[z.categoria][0]}</td><td style="padding:6px">${z.n_comp}${z.tope?'+':''}</td><td style="padding:6px">${esc(z.nse)}</td><td style="padding:6px">${esc((z.vial||{}).badge||'—')}</td><td style="padding:6px">${z.dist_km} km</td></tr>`).join('')+'</table></div>';}
+  if(t==='nodos'){
+    if(!NODOS.length){h='<p class="cap" style="margin:0">No encontré lugares donde se junte mucha competencia: está repartida.</p>';}
+    else{h=`<div class="isec" style="background:#FDF1F0;border-radius:10px;padding:10px 12px;border:0;margin-bottom:8px"><p><b>Aquí sí hay clientes, pero también muchos negocios como el tuyo.</b> Si abres aquí, la gente ya tiene a dónde ir, así que necesitas ofrecer algo distinto (producto, precio, trato u horario) y estar en redes sociales y Google Maps desde el primer día. Eso cuesta más que abrir en una zona normal.</p></div>`+
+      `<div class="clist">`+NODOS.map(n=>`<button class="cp" data-n="${n.rank-1}" style="grid-template-columns:auto 1fr;align-items:start"><span style="background:#D9493F;color:#fff;font:700 11px 'IBM Plex Sans';border-radius:99px;padding:3px 8px">⚠ ${n.rank}</span><div style="min-width:0"><div class="nm">${esc(n.nombre)}</div><div class="mt">${n.n} negocios como el tuyo en ${fmt(n.radio_m)} m${n.rating_prom?` · calificación promedio ${n.rating_prom}★`:''}</div>${n.top&&n.top.nombre?`<div class="mt">El más fuerte: ${esc(n.top.nombre)} (${n.top.rating||'—'}★, ${fmt(n.top.reviews)} reseñas)</div>`:''}<div class="mt" style="color:#D9493F">Aparta de ${money(n.extra_min)} a ${money(n.extra_max)} más para tu marca y redes</div></div></button>`).join('')+`</div>`+
+      `<p class="cap">Ese dinero extra es una guía (10 % a 20 % de lo que normalmente cuesta abrir este negocio), no una cotización.</p>`;}
+  }
+  if(t==='guia'){const z=Z[sel]||{},r=z.recom||{};const it=[['Qué calle te conviene',r.vialidad_ideal],['Que se vea desde la calle',r.visibilidad],['Estacionamiento',r.estacionamiento],['Si es en plaza comercial',r.plaza_recomendacion],['A quién copiarle lo bueno',r.ref_competidor],['Según los ingresos de la zona',r.tip_nse]].filter(x=>x[1]);
+    h=`<p class="cap" style="margin:0 0 6px">Qué buscar en un local de la zona ${sel+1}: <b>${esc(z.nombre||'')}</b></p>`+it.map(([a,b])=>`<div class="isec"><h4>${a}</h4><p>${esc(b)}</p></div>`).join('');}
+  if(t==='metodo'){h=`<div class="isec"><p><b>1.</b> Dividí ${D.radio_km} km alrededor del punto que buscaste en ${C.length} zonas.</p></div>
+    <div class="isec"><p><b>2.</b> En cada zona conté cuántos negocios como el tuyo hay, qué tan bien calificados están y qué tan fieles son sus clientes.</p></div>
+    <div class="isec"><p><b>3.</b> En las 10 mejores revisé si vive gente: conté tienditas, farmacias y escuelas, que solo existen donde hay vecinos. Si casi no hay, la marco como <b>Vive poca gente</b> y no la recomiendo.</p></div>
+    <div class="isec"><p><b>4.</b> A las ${Z.length} mejores les sumé los ingresos de la colonia (INEGI) y si la calle le conviene a tu giro.</p></div>
+    <div class="isec"><p><b>Ya hay clientes:</b> hay un negocio bien calificado y no demasiada competencia. <b>Sin competencia:</b> serías el primero, pero hay que comprobar que la gente compraría. <b>Demasiada competencia:</b> muchos negocios como el tuyo. <b>Donde se junta la competencia:</b> lugares con muchos negocios juntos.</p></div>
+    <p class="cap">Esta búsqueda usó ${D.llamadas} consultas a Google.</p>`;}
   $('d-in').innerHTML=h;
   document.querySelectorAll('#d-in tr[data-i]').forEach(e=>e.onclick=()=>pick(+e.dataset.i,true));
+  document.querySelectorAll('#d-in [data-n]').forEach(e=>e.onclick=()=>{const n=NODOS[+e.dataset.n];map.flyTo([n.lat,n.lng],15,{duration:.6});});
 }
 tabs('#drawer',drawTab);
 $('d-min').onclick=()=>{const d=$('drawer');d.classList.toggle('min');$('d-min').textContent=d.classList.contains('min')?'+':'–';};
@@ -694,7 +723,7 @@ def render_chat(claude, data: dict, tier_key: str, idioma: str = "es", modelo: s
             with st.container(key=f"chip_q{i}_{aid}"):
                 if st.button(sug, key=f"sugq_{aid}_{i}"):
                     st.session_state[k_pend] = sug
-        prompt = st.chat_input(f"Pregúntame algo · te quedan {restantes}", key=f"chat_{aid}")
+        prompt = st.chat_input(f"Pregúntame lo que quieras · te quedan {restantes}", key=f"chat_{aid}")
     else:
         st.caption("Usaste las preguntas de tu plan. PRO y Premium incluyen más consultas al agente.")
     prompt = prompt or st.session_state.pop(k_pend, None)
@@ -706,6 +735,8 @@ def render_chat(claude, data: dict, tier_key: str, idioma: str = "es", modelo: s
         "Eres el agente de 4SITE, analista senior de ubicaciones comerciales en México. "
         f"Responde en {'español' if idioma == 'es' else 'English'}, directo y accionable, máximo 130 palabras, "
         "con bullets cortos cuando ayude. Usa SOLO los datos del análisis; no inventes cifras. "
+        "Habla sencillo, como a alguien que nunca ha abierto un negocio: nada de siglas ni tecnicismos "
+        "(NSE, ROI, ticket, score, vialidad) sin explicarlos en palabras comunes. "
         "Si preguntan por algo que no está en los datos, dilo."
         + (f" Estos módulos NO están en el plan del usuario: {', '.join(bloqueados)}. "
            "Si preguntan por ellos, di que están en un plan superior, sin estimarlos." if bloqueados else "")

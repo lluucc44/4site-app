@@ -2067,10 +2067,10 @@ def recomendar_tipos_negocio(lat, lng, direccion, radio=None, tipo_plaza=None):
             "aj_demografia": score_final - score_ctx,
             "aj_vial": ((ctx_t or {}).get("analisis_vial") or {}).get("ajuste_score", 0),
             # Índice sin tope de 100 (mismos ajustes medidos sobre base neutra) → desempata
-            "indice": score_base + (ajustar_score_por_contexto(50, tipo_key, ctx_t) - 50)
+            "_desempate": score_base + (ajustar_score_por_contexto(50, tipo_key, ctx_t) - 50)
                       + (ajustar_score_por_demografia(50, tipo_key, demografia) - 50),
         })
-    recomendaciones.sort(key=lambda x: (x["score"], x["indice"]), reverse=True)
+    recomendaciones.sort(key=lambda x: (x["score"], x["_desempate"]), reverse=True)
     return recomendaciones, contexto, demografia
 
 # ============================================
@@ -2542,8 +2542,9 @@ IMPORTANTE: Todo el análisis es sobre: "{nombre_ub_principal}"
 *Actualiza al plan {'Básico ($99)' if tier_key == 'free' else 'PRO ($499)'} para incluir tráfico, mercado y forecast en tu recomendación.*"""
 
     prompt = f"""Eres un analista senior de inteligencia comercial y ubicaciones.
-Tu tarea es emitir el Recomendación Final final de una ubicación, integrando TODOS los datos disponibles.
+Tu tarea es emitir la Recomendación Final de una ubicación, integrando TODOS los datos disponibles.
 NO inventes datos que no estén en el contexto. Sé directo, preciso y accionable.
+LENGUAJE: escribe para alguien que nunca ha abierto un negocio. Frases cortas y palabras de todos los días. No uses siglas ni tecnicismos (NSE, ROI, ticket, KPI, vialidad, densidad, canibalización, score) sin explicarlos; di por ejemplo 'nivel de ingresos de la zona', 'en cuánto recuperas tu dinero', 'gasto por cliente', 'tipo de calle', 'qué tanta gente vive cerca', 'calificación'.
 
 DATOS DEL ANÁLISIS:
 {contexto_datos}
@@ -3451,13 +3452,80 @@ def _categoria_zona(n_eq500, optimo, mejor_rating, mejor_reviews):
     return "moderada"
 
 
-_BONO_CATEGORIA = {"mercado_probado": 12, "moderada": 0, "virgen": 3, "saturada": -8}
+_BONO_CATEGORIA = {"mercado_probado": 12, "moderada": 0, "virgen": 3, "saturada": -8, "baja_densidad": -15}
 CATEGORIA_LABEL = {
-    "mercado_probado": "Mercado probado",
-    "moderada":        "Competencia moderada",
-    "virgen":          "Zona virgen",
-    "saturada":        "Saturada",
+    "mercado_probado": "Ya hay clientes",
+    "moderada":        "Competencia normal",
+    "virgen":          "Sin competencia",
+    "saturada":        "Demasiada competencia",
+    "baja_densidad":   "Vive poca gente",
 }
+
+# Comercios y servicios de barrio: solo existen donde vive gente → proxy de densidad habitacional
+_TIPOS_ACTIVIDAD = ["convenience_store", "grocery_store", "supermarket", "pharmacy",
+                    "school", "primary_school", "secondary_school"]
+
+
+def _actividad_urbana(lat, lng, radio_m):
+    """Cuenta comercios de barrio y escuelas alrededor (máx. 20 por la API). None si falla."""
+    try:
+        r = requests.post(
+            "https://places.googleapis.com/v1/places:searchNearby",
+            headers={"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_API_KEY,
+                     "X-Goog-FieldMask": "places.id"},
+            json={"includedTypes": _TIPOS_ACTIVIDAD, "maxResultCount": 20, "rankPreference": "DISTANCE",
+                  "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lng},
+                                                     "radius": float(radio_m)}}},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        return len(r.json().get("places", []))
+    except Exception:
+        return None
+
+
+def _nivel_actividad(n, area_km2):
+    """Clasifica la actividad urbana de la zona según el área del hexágono."""
+    if n is None:
+        return None
+    alta = max(2, min(12, 15 * area_km2))
+    media = max(1, min(4, 5 * area_km2))
+    return "alta" if n >= alta else "media" if n >= media else "baja"
+
+
+_AJUSTE_ACTIVIDAD = {"alta": 0, "media": -8, "baja": -30}
+
+
+def _nodos_competencia(comps, radio_m, min_n, max_nodos=3):
+    """Agrupa competidores cercanos y devuelve los núcleos más densos (concentración de competencia)."""
+    pts = [c for c in comps if c.get("lat") is not None]
+    nodos, usados = [], set()
+
+    def _d(a, b):
+        return _haversine_m(a["lat"], a["lng"], b["lat"], b["lng"])
+
+    for _ in range(max_nodos):
+        libres = [i for i in range(len(pts)) if i not in usados]
+        if not libres:
+            break
+        mejor_i, vecinos = None, []
+        for i in libres:
+            v = [j for j in libres if _d(pts[i], pts[j]) <= radio_m]
+            if len(v) > len(vecinos):
+                mejor_i, vecinos = i, v
+        if len(vecinos) < min_n:
+            break
+        miembros = [pts[j] for j in vecinos]
+        usados.update(vecinos)
+        lat_c = sum(m["lat"] for m in miembros) / len(miembros)
+        lng_c = sum(m["lng"] for m in miembros) / len(miembros)
+        rts = [m["rating"] for m in miembros if m.get("rating")]
+        top = max(miembros, key=lambda m: m.get("reviews") or 0)
+        nodos.append({"lat": lat_c, "lng": lng_c, "n": len(miembros), "radio_m": int(radio_m),
+                      "rating_prom": round(sum(rts) / len(rts), 1) if rts else None,
+                      "top": {k: top.get(k) for k in ("nombre", "rating", "reviews")}})
+    return nodos
 
 
 def _nombre_legible_zona(geo, dem):
@@ -3547,7 +3615,7 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
             "tope": len(comps) >= 20, "desglose": desg,
             "categoria": cat,
             "score_prelim": max(0, min(100, score_c + _BONO_CATEGORIA[cat])),
-            "indice": score_c + _BONO_CATEGORIA[cat],   # sin tope, para ordenar cuando hay empates en 100
+            "_desempate": score_c + _BONO_CATEGORIA[cat],   # sin tope, para ordenar cuando hay empates en 100
             "mejor": {"nombre": (mejor or {}).get("displayName", {}).get("text", ""), "rating": mr, "reviews": mv} if mejor else None,
             "detallada": False,
         })
@@ -3561,8 +3629,30 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
                               "reviews": int(p.get("userRatingCount") or 0),
                               "lat": loc["latitude"], "lng": loc["longitude"]}
 
-    # ── Pasada 2: detalle de las mejores ──
-    cand = sorted(celdas, key=lambda c: c["score_prelim"], reverse=True)[:n_detalle]
+    # ── Pasada 1.5: actividad urbana (proxy de densidad habitacional) en las 10 mejores ──
+    # La densidad INEGI que tenemos es por municipio (igual para todas las zonas); esto sí distingue
+    # una colonia habitada de un terreno baldío o una zona industrial.
+    area_hex = 3 * math.sqrt(3) / 2 * r_hex ** 2
+    medir = sorted(celdas, key=lambda c: c["score_prelim"], reverse=True)[:10]
+    if progress:
+        progress(0.75, "Midiendo dónde vive la gente…")
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        acts = list(ex.map(lambda c: _actividad_urbana(c["lat"], c["lng"], radio_busq), medir))
+    for c, n_act in zip(medir, acts):
+        nivel = _nivel_actividad(n_act, area_hex)
+        c["actividad_n"], c["actividad"] = n_act, nivel
+        if nivel:
+            aj = _AJUSTE_ACTIVIDAD[nivel]
+            if nivel == "baja" and c["categoria"] in ("virgen", "moderada"):
+                c["categoria"] = "baja_densidad"
+                aj += _BONO_CATEGORIA["baja_densidad"] - _BONO_CATEGORIA["virgen"]
+            c["score_prelim"] = max(0, min(100, c["score_prelim"] + aj))
+            c["_desempate"] += aj
+            c["score"] = c["score_prelim"]
+
+    # ── Pasada 2: detalle de las mejores (nunca zonas con poca población si hay alternativas) ──
+    elegibles = [c for c in medir if c.get("categoria") != "baja_densidad"] or medir
+    cand = sorted(elegibles, key=lambda c: c["score_prelim"], reverse=True)[:n_detalle]
     gm = _GmapsCache(gmaps)
     def _detalle(c):
         try:
@@ -3585,7 +3675,7 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
         # Mismos ajustes medidos sobre una base neutra (50) → aportación real sin el tope de 100
         d_ctx = ajustar_score_por_contexto(50, tipo_key, ctx) - 50
         d_dem = (ajustar_score_por_demografia(50, tipo_key, dem) - 50) if dem else 0
-        c["indice"] = c["indice"] + d_ctx + d_dem
+        c["_desempate"] = c["_desempate"] + d_ctx + d_dem
         nombre, colonia, ruta, mun = _nombre_legible_zona(geo, dem)
         rumbo_txt = {"N": "al norte", "NE": "al noreste", "E": "al este", "SE": "al sureste",
                      "S": "al sur", "SO": "al suroeste", "O": "al oeste", "NO": "al noroeste"}.get(c["rumbo"], "")
@@ -3604,9 +3694,9 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
 
     # Orden: score final; como el score se topa en 100, desempata por tipo de mercado,
     # score preliminar y cercanía a la referencia.
-    _prio = {"mercado_probado": 3, "moderada": 2, "virgen": 1, "saturada": 0}
+    _prio = {"mercado_probado": 3, "moderada": 2, "virgen": 1, "saturada": 0, "baja_densidad": -1}
     zonas = sorted([c for c in celdas if c["detallada"]],
-                   key=lambda c: (c["score"], c["indice"], _prio[c["categoria"]], -c["dist_km"]), reverse=True)
+                   key=lambda c: (c["score"], c["_desempate"], _prio[c["categoria"]], -c["dist_km"]), reverse=True)
     # Nombres únicos: colonias repetidas se distinguen por rumbo y distancia
     from collections import Counter
     _rep = Counter(z["nombre"] for z in zonas)
@@ -3620,33 +3710,68 @@ def buscar_zonas_hex(lat_ref, lng_ref, radio_km, tipo_key, n_detalle=6, progress
         m = z.get("mejor") or {}
         z["recom"] = recomendaciones_ubicacion(tipo_key, z.get("nse", "C"),
                                                m.get("nombre", ""), m.get("rating", 0), m.get("reviews", 0))
-    return {"celdas": celdas, "zonas": zonas, "competidores": list(todos.values()),
+    # ── Nodos de concentración de competencia ──
+    tinfo = TIPOS_NEGOCIO[tipo_key]
+    r_nodo = max(300, min(800, int(r_hex * 1000 * 0.6)))
+    nodos = _nodos_competencia(list(todos.values()), r_nodo, max(4, optimo + 2))
+    for k, nd in enumerate(nodos):
+        try:
+            geo = gm.reverse_geocode((nd["lat"], nd["lng"]))
+        except Exception:
+            geo = None
+        nombre, _, _, _ = _nombre_legible_zona(geo, None)
+        nd["nombre"] = nombre or f"Zona {k + 1}"
+        # Referencia: entrar a un nodo exige marca y redes desde el día uno (10–20 % extra sobre la inversión típica)
+        nd["extra_min"] = int(round(tinfo.get("inversion_min", 300000) * 0.10, -3))
+        nd["extra_max"] = int(round(tinfo.get("inversion_max", 600000) * 0.20, -3))
+        nd["rank"] = k + 1
+    for z in zonas:
+        dentro = [nd for nd in nodos if _haversine_m(z["lat"], z["lng"], nd["lat"], nd["lng"]) <= nd["radio_m"] * 1.5]
+        if dentro:
+            z["nodo"] = dentro[0]["rank"]
+            z["por_que"].insert(0, {"s": "!", "t": f"Aquí se junta la competencia (zona {dentro[0]['rank']} del mapa): solo entra si "
+                                    "ofreces algo distinto y tienes redes sociales desde el primer día. Eso cuesta más de lo normal."})
+    return {"celdas": celdas, "zonas": zonas, "competidores": list(todos.values()), "nodos": nodos,
             "radio_busq_m": radio_busq, "radio_km": radio_km,
-            "llamadas": len(celdas) + len(cand) + 1}
+            "llamadas": len(celdas) + len(medir) + len(cand) + len(nodos) + 1}
 
 
 def _por_que_zona(z, tipo_key, optimo):
-    """2–4 razones legibles de por qué la zona queda donde queda (sin IA)."""
+    """2–5 razones en lenguaje sencillo de por qué la zona queda donde queda (sin IA)."""
     out = []
     cat = z["categoria"]; n = z["n_comp"]; m = z.get("mejor") or {}
     if cat == "mercado_probado":
-        out.append(("+", f"Demanda comprobada: {m.get('nombre','un competidor')} ({m.get('rating')}★, {m.get('reviews')} reseñas) sin saturación ({n} competidores)."))
+        out.append(("+", f"Ya hay clientes: {m.get('nombre', 'un negocio')} tiene {m.get('rating')}★ y {m.get('reviews')} reseñas, "
+                         f"y solo hay {n} negocios como el tuyo."))
     elif cat == "virgen":
-        out.append(("~", "Sin competencia directa: serías el primero, pero la demanda no está validada. Visita la zona en horario pico."))
+        out.append(("~", "No hay competencia: serías el primero, pero nadie ha probado que aquí se venda. Ve a verlo en las horas con más gente."))
     elif cat == "saturada":
-        out.append(("−", f"Zona saturada: ≈{z['n_eq500']} competidores por cada 500 m (óptimo del giro: {optimo})."))
+        out.append(("−", f"Demasiada competencia: hay unos {z['n_eq500']} negocios como el tuyo cerca; lo sano son {optimo}."))
+    elif cat == "baja_densidad":
+        pass
     else:
-        out.append(("~", f"{n} competidores; ninguno domina con rating alto y muchas reseñas."))
+        out.append(("~", f"Hay {n} negocios como el tuyo y ninguno domina la zona."))
     if z.get("aj_vial"):
-        out.append(("+" if z["aj_vial"] > 0 else "−", f"{z['vial']['badge']}: {'+' if z['aj_vial']>0 else ''}{z['aj_vial']} pts por vialidad para este giro."))
+        calle = (z.get("vial") or {}).get("ruta") or "esta calle"
+        out.append(("+" if z["aj_vial"] > 0 else "−",
+                    f"Está sobre {calle}: " + ("buena calle para tu giro." if z["aj_vial"] > 0 else "no es buena calle para tu giro.")))
     if z.get("aj_demo"):
-        out.append(("+" if z["aj_demo"] > 0 else "−", f"NSE {z.get('nse')} e ingreso ${z.get('ingreso',0):,}: {'+' if z['aj_demo']>0 else ''}{z['aj_demo']} pts por perfil demográfico."))
+        out.append(("+" if z["aj_demo"] > 0 else "−",
+                    f"Las familias de aquí ganan unos ${z.get('ingreso', 0):,} al mes: "
+                    + ("encaja con tu giro." if z["aj_demo"] > 0 else "puede quedar corto para tu giro.")))
+    act = z.get("actividad")
+    if act == "alta":
+        out.append(("+", f"Vive mucha gente: hay {z.get('actividad_n')} tienditas, farmacias y escuelas alrededor."))
+    elif act == "media":
+        out.append(("~", f"Vive gente, pero no tanta: {z.get('actividad_n')} tienditas, farmacias y escuelas alrededor."))
+    elif act == "baja":
+        out.append(("−", "Vive poca gente: casi no hay tienditas ni escuelas. Sin gente cerca, el negocio no se sostiene."))
     if z.get("tope"):
-        out.append(("!", "Google devolvió el máximo (20): la competencia real podría ser mayor."))
-    return [{"s": s, "t": t} for s, t in out]
+        out.append(("!", "Google solo muestra 20 negocios por búsqueda: puede haber más competencia."))
+    return [{"s": s_, "t": t} for s_, t in out]
 
 
-def resumen_agente_zonas(zonas, tipo_nombre, ubicacion_ref, radio_km, idioma="es"):
+def resumen_agente_zonas(zonas, tipo_nombre, ubicacion_ref, radio_km, idioma="es", nodos=None):
     """Una sola llamada a Claude para comparar las mejores zonas."""
     if not zonas:
         return ""
@@ -3655,14 +3780,23 @@ def resumen_agente_zonas(zonas, tipo_nombre, ubicacion_ref, radio_km, idioma="es
         "categoria": CATEGORIA_LABEL[z["categoria"]], "competidores": z["n_comp"],
         "mejor_competidor": z.get("mejor"), "nse": z.get("nse"), "ingreso": z.get("ingreso"),
         "vialidad": (z.get("vial") or {}).get("badge"), "dist_km_ref": z["dist_km"],
+        "actividad_urbana": z.get("actividad"), "en_nodo_de_competencia": z.get("nodo"),
     } for z in zonas[:6]]
     prompt = f"""Eres analista senior de expansión comercial en México. Un emprendedor busca dónde abrir un {tipo_nombre}
 en un radio de {radio_km} km alrededor de "{ubicacion_ref}". Estas son las zonas mejor evaluadas:
 {json.dumps(datos, ensure_ascii=False, indent=1)}
 
-Responde en {idioma} con este formato EXACTO (máx. 170 palabras, sin inventar datos):
+Nodos de concentración de competencia (donde hay muchos competidores juntos):
+{json.dumps([{k: n.get(k) for k in ("nombre", "n", "rating_prom", "top")} for n in (nodos or [])], ensure_ascii=False)}
+
+Reglas: nunca recomiendes una zona con actividad_urbana "baja" (no hay gente que sostenga el negocio).
+LENGUAJE: escribe para alguien que nunca ha abierto un negocio. Frases cortas y palabras de todos los días. No uses siglas ni tecnicismos (NSE, ROI, ticket, KPI, vialidad, densidad, canibalización, score) sin explicarlos; di por ejemplo 'nivel de ingresos de la zona', 'en cuánto recuperas tu dinero', 'gasto por cliente', 'tipo de calle', 'qué tanta gente vive cerca', 'calificación'.
+Si la zona recomendada está en un nodo de competencia, dilo y advierte que exige diferenciación y redes.
+
+Responde en {idioma} con este formato EXACTO (máx. 190 palabras, sin inventar datos):
 **Zona recomendada:** [nombre] — [1 línea de por qué]
 **Alternativa:** [nombre] — [cuándo conviene más que la primera]
+**Nodos de competencia:** [dónde se concentra la competencia y qué implica entrar ahí, 1 línea; si no hay, dilo]
 **Evitar:** [zona o patrón a evitar y por qué, 1 línea]
 **Siguiente paso:** [qué validar en campo antes de firmar, 1 línea]"""
     try:
@@ -4103,7 +4237,7 @@ def generar_pptx_zona_potencial(resultados, ubicacion_ref, radio_km,
         # Dirección
         txt(sl, res.get("direccion","")[:55], 0.92, y+0.06, 7.0, 0.3, sz=10, bold=True, col=C["oscuro"])
         # Categoria
-        cat = {"mercado_probado":"Mercado probado","compartir_mercado":"Compartir mercado","saturada":"Saturada",
+        cat = {"mercado_probado":"Mercado probado","compartir_mercado":"Compartir mercado","saturada":"Saturada","baja_densidad":"Poca poblacion",
                "virgen":"Zona virgen","moderada":"Zona moderada"}.get(res.get("zona_categoria",""), "")
         cat_c = C["verde"] if is_top3 else C["azul"]
         txt(sl, cat, 0.92, y+0.42, 3.5, 0.28, sz=8, col=cat_c, bold=True)
@@ -6271,27 +6405,27 @@ def preparar_datos_dashboard(res: dict, tier_key: str) -> dict:
 
     _esc_base = (forecast or {}).get("escenarios", {}).get("base", {})
     kpis = [
-        kpi("Competidores", f"{len(competidores)}{'+' if len(competidores) >= 20 else ''}",
-            f"en {radio_m:,} m" + (f" · ≈{desglose.get('competidores_equiv_500m')} por 500 m" if radio_m != 500 and desglose.get('competidores_equiv_500m') is not None else "")),
-        kpi("Población", f"{demografia.get('poblacion_actual', demografia.get('poblacion_estimada', 0)):,}", f"hab. en {demografia.get('radio_m', 500):,} m (INEGI)"),
-        kpi("Densidad", f"{int(dens):,}", "hab/km²"),
-        kpi("NSE", demografia.get("nse_predominante", "—"), "predominante", locks["demografia"]),
-        kpi("Ingreso prom.", _m(ingreso), "por hogar/mes", locks["demografia"]),
-        kpi("Ticket zona", _m((ticket or {}).get("ticket_competencia")), (ticket or {}).get("rango_zona", "")[:28], locks["ticket"]),
-        kpi("Mercado capturable", _m((mercado or {}).get("mercado_captura_mensual")), f"{(mercado or {}).get('factor_captura_pct', 0):.0f}% del total/mes", locks["mercado"]),
-        kpi("Clientes/día", f"{(mercado or {}).get('clientes_dia_estimados', '—')}", "estimados", locks["mercado"]),
-        kpi("Venta base/mes", _m(_esc_base.get("promedio_mensual")), "forecast escenario base", locks["forecast"]),
-        kpi("Venta año 1", _m(_esc_base.get("total_anual")), "escenario base", locks["forecast"]),
-        kpi("ROI 12 meses", f"{(roi or {}).get('roi_12m_pct', '—')}%", (roi or {}).get("clasificacion_roi", "")[:28], locks["roi"],
+        kpi("Negocios como el tuyo", f"{len(competidores)}{'+' if len(competidores) >= 20 else ''}",
+            f"a {radio_m:,} m a la redonda" + (f" · ≈{desglose.get('competidores_equiv_500m')} por cada 500 m" if radio_m != 500 and desglose.get('competidores_equiv_500m') is not None else "")),
+        kpi("Personas que viven cerca", f"{demografia.get('poblacion_actual', demografia.get('poblacion_estimada', 0)):,}", f"a {demografia.get('radio_m', 500):,} m (INEGI)"),
+        kpi("Qué tan poblado está", f"{int(dens):,}", "personas por km²"),
+        kpi("Nivel de ingresos", demografia.get("nse_predominante", "—"), "A/B alto · C medio · D bajo", locks["demografia"]),
+        kpi("Ingreso por familia", _m(ingreso), "al mes, promedio", locks["demografia"]),
+        kpi("Gasto por cliente", _m((ticket or {}).get("ticket_competencia")), "lo que paga en la competencia", locks["ticket"]),
+        kpi("Ventas que puedes ganar", _m((mercado or {}).get("mercado_captura_mensual")), "al mes, si te va como al promedio", locks["mercado"]),
+        kpi("Clientes al día", f"{(mercado or {}).get('clientes_dia_estimados', '—')}", "estimado", locks["mercado"]),
+        kpi("Venta al mes", _m(_esc_base.get("promedio_mensual")), "escenario normal", locks["forecast"]),
+        kpi("Venta el primer año", _m(_esc_base.get("total_anual")), "escenario normal", locks["forecast"]),
+        kpi("Ganancia el primer año", f"{(roi or {}).get('roi_12m_pct', '—')}%", "sobre lo que inviertes", locks["roi"],
             "#1F9D57" if (roi or {}).get("roi_12m_pct", 0) and float((roi or {}).get("roi_12m_pct", 0)) > 0 else None),
-        kpi("Recuperación", f"{(roi or {}).get('meses_recuperacion', '—')} meses", f"P. equilibrio {_m((roi or {}).get('punto_eq_ventas_mes'))}/mes", locks["roi"]),
+        kpi("Recuperas tu dinero en", f"{(roi or {}).get('meses_recuperacion', '—')} meses", f"necesitas vender {_m((roi or {}).get('punto_eq_ventas_mes'))} al mes para no perder", locks["roi"]),
     ]
 
     # ── Ajustes del score (visibles para explicar el número) ──
     ajustes = []
     _av = contexto.get("analisis_vial") or {}
     if _av.get("ajuste_score"):
-        ajustes.append({"l": "Vialidad", "v": int(_av["ajuste_score"])})
+        ajustes.append({"l": "Por el tipo de calle", "v": int(_av["ajuste_score"])})
 
     # ── Tráfico ──
     traf = None
@@ -6314,19 +6448,19 @@ def preparar_datos_dashboard(res: dict, tier_key: str) -> dict:
             dg = r.get("desglose") or {}
             razones = []
             if dg.get("densidad", 0) >= 80:
-                razones.append((abs(dg["densidad"] - 60), "+", f"Poca competencia: {r['num_competidores']} en {radio_m:,} m"))
+                razones.append((abs(dg["densidad"] - 60), "+", f"Hay poca competencia: {r['num_competidores']} negocios así a {radio_m:,} m"))
             elif dg.get("densidad", 100) <= 45:
-                razones.append((abs(dg["densidad"] - 60), "−", f"Zona competida: {r['num_competidores']} en {radio_m:,} m"))
+                razones.append((abs(dg["densidad"] - 60), "−", f"Hay mucha competencia: {r['num_competidores']} negocios así a {radio_m:,} m"))
             if dg.get("calidad", 0) >= 80:
-                razones.append((15, "+", "Competidores con rating bajo: espacio para ser el mejor"))
+                razones.append((15, "+", "La competencia tiene malas calificaciones: puedes ser el mejor"))
             elif r["num_competidores"] and dg.get("calidad", 100) <= 20:
-                razones.append((15, "−", "La competencia está muy bien calificada (≥4.3★)"))
+                razones.append((15, "−", "La competencia está muy bien calificada (4.3★ o más)"))
             if r.get("aj_vial"):
                 razones.append((abs(r["aj_vial"]), "+" if r["aj_vial"] > 0 else "−",
-                                f"Vialidad: {'+' if r['aj_vial'] > 0 else ''}{r['aj_vial']} pts para este giro"))
+                                ("La calle le conviene a este giro" if r["aj_vial"] > 0 else "La calle no le conviene a este giro")))
             if r.get("aj_demografia"):
                 razones.append((abs(r["aj_demografia"]), "+" if r["aj_demografia"] > 0 else "−",
-                                f"Perfil NSE {_nse_z}: {'+' if r['aj_demografia'] > 0 else ''}{r['aj_demografia']} pts"))
+                                ("El nivel de ingresos de la zona le va bien" if r["aj_demografia"] > 0 else "El nivel de ingresos de la zona no le ayuda")))
             razones.sort(key=lambda x: -x[0])
             _niv, _ = nivel_score(r["score"], idioma)
             giros.append({
@@ -6507,6 +6641,30 @@ def _frases_ejemplo(grupo="sitio"):
         _procesar_frase(_frase)
 
 
+def _bloque_siguientes_pasos(data):
+    """Tres pasos concretos para después del análisis, con los datos que tenemos."""
+    pasos = []
+    t_ = data.get("trafico") or {}
+    if t_.get("picos") and not (data.get("locks") or {}).get("trafico"):
+        pasos.append(f"Ve al lugar un {str(t_.get('dia_pico') or 'sábado').lower()} entre {t_['picos'][0]} y cuenta cuánta gente pasa.")
+    else:
+        pasos.append("Ve al lugar a la hora de la comida y en la tarde, y cuenta cuánta gente pasa.")
+    comps = data.get("competidores") or []
+    if comps:
+        c0 = comps[0]
+        pasos.append(f"Visita a tu competidor más cercano ({c0['nombre']}, a {c0['dist']:,} m): mira precios, clientes y qué le falta.")
+    else:
+        pasos.append("Pregunta a vecinos y negocios de al lado si buscarían algo como lo tuyo.")
+    pasos.append("Antes de firmar, pregunta la renta de 2 o 3 locales de la zona para comparar.")
+    items = "".join(f"<div><span class='p'>{i + 1}</span><span>{_esc_html(p)}</span></div>" for i, p in enumerate(pasos))
+    return (f"<div class='ag-lock' style='margin:4px 0 12px'><b style='color:#13243B'>¿Y ahora qué?</b>"
+            f"<div class='ag-pc' style='margin-top:6px'>{items}</div></div>")
+
+
+def _esc_html(x):
+    return (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 # ── Resultados de validar / descubrir: conversación del agente ────
 def render_conversacion_sitio(data, r, tier_key, idioma):
     if r.get("modo") == "recomendar":
@@ -6517,18 +6675,19 @@ def render_conversacion_sitio(data, r, tier_key, idioma):
     L_ = data.get("locks", {})
     pasos = [
         ("Ubiqué la dirección", True),
-        (f"{data.get('n_competidores', 0)}{'+' if data.get('n_competidores', 0) >= 20 else ''} competidores en "
+        (f"Encontré {data.get('n_competidores', 0)}{'+' if data.get('n_competidores', 0) >= 20 else ''} negocios como el tuyo a "
          f"{data.get('radio_m', 500):,} m (Google)", True),
-        ("Tipo de calle y acceso", bool(data.get("vial"))),
-        ("Perfil INEGI y nivel socioeconómico", not L_.get("demografia")),
-        ("Tráfico por hora y día", not L_.get("trafico")),
-        ("Mercado, ventas y retorno", not L_.get("forecast")),
-        ("Recomendación final", not L_.get("diag_parcial")),
+        ("Revisé la calle y cómo se llega", bool(data.get("vial"))),
+        ("Revisé quién vive cerca y cuánto gana (INEGI)", not L_.get("demografia")),
+        ("Calculé cuánta gente pasa por hora y día", not L_.get("trafico")),
+        ("Calculé cuánto podrías vender y ganar", not L_.get("forecast")),
+        ("Te di mi recomendación completa", not L_.get("diag_parcial")),
     ]
     if r.get("modo") == "recomendar":
-        pasos.insert(1, (f"Comparé {len(r.get('recomendaciones') or [])} giros en este punto", True))
+        pasos.insert(1, (f"Comparé {len(r.get('recomendaciones') or [])} tipos de negocio en este punto", True))
     st.markdown(bloque_ruta(pasos), unsafe_allow_html=True)
     st.markdown(bloque_veredicto(data), unsafe_allow_html=True)
+    st.markdown(_bloque_siguientes_pasos(data), unsafe_allow_html=True)
     render_chat(claude, data, tier_key, idioma)
     _b1, _b2 = st.columns(2)
     _b1.button("↺ Nuevo análisis", on_click=_nuevo_analisis, use_container_width=True, key="btn_nuevo")
@@ -6545,7 +6704,7 @@ def zona_formulario(agent, mapc, tier_key, idioma):
     radios = [1, 2, 3, 5] if es_premium else [1, 2, 3]
     n_det = 6 if es_premium else 4
     with agent:
-        tipo_z = st.selectbox("Tu giro", list(TIPOS_NEGOCIO.keys()),
+        tipo_z = st.selectbox("¿Qué negocio quieres abrir?", list(TIPOS_NEGOCIO.keys()),
                               format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"], key="zona_tipo")
         dir_ref = st.text_input("¿Cerca de dónde buscas?", key="zona_ref",
                                 placeholder="Colonia, zona o ciudad · o toca el mapa")
@@ -6553,8 +6712,8 @@ def zona_formulario(agent, mapc, tier_key, idioma):
             st.session_state[f"zona_radio_{tier_key}"] = 3
         radio_km = st.select_slider("Qué tan lejos buscar", options=radios, key=f"zona_radio_{tier_key}",
                                     format_func=lambda x: f"{x} km a la redonda")
-        st.caption(f"Reviso 19 zonas y detallo las {n_det} mejores. Tarda de 15 a 30 segundos."
-                   + ("" if es_premium else " Con Premium: hasta 5 km y 6 zonas detalladas."))
+        st.caption(f"Reviso 19 zonas y te explico las {n_det} mejores. Tarda de 15 a 30 segundos."
+                   + ("" if es_premium else " Con Premium: hasta 5 km y 6 zonas."))
 
     with mapc:
         lat_c = lng_c = None
@@ -6598,7 +6757,8 @@ def zona_formulario(agent, mapc, tier_key, idioma):
             res = buscar_zonas_hex(lat_r, lng_r, radio_km, tipo_z, n_detalle=n_det,
                                    progress=lambda f, tx: barra.progress(f, text=tx))
             barra.progress(0.9, text="Comparando las mejores zonas…")
-            agente_txt = resumen_agente_zonas(res["zonas"], TIPOS_NEGOCIO[tipo_z]["nombre"], ref_txt, radio_km, idioma)
+            agente_txt = resumen_agente_zonas(res["zonas"], TIPOS_NEGOCIO[tipo_z]["nombre"], ref_txt, radio_km, idioma,
+                                              nodos=res.get("nodos"))
         finally:
             barra.empty()
         st.session_state["zona_res"] = {
@@ -6617,10 +6777,11 @@ def _datos_zona(zr, tier_key):
         "ubicacion": zr["ref"], "lat": zr["lat"], "lng": zr["lng"], "radio_km": zr["radio_km"],
         "tipo_nombre": _nombre_giro(zr["tipo"]), "tier_nombre": TIERS[tier_key]["nombre"],
         "celdas": [{k: c.get(k) for k in ("lat", "lng", "poly", "score", "categoria", "n_comp", "tope",
-                                          "detallada", "nombre", "dist_km")} for c in res["celdas"]],
+                                          "detallada", "nombre", "dist_km", "actividad")} for c in res["celdas"]],
         "zonas": res["zonas"], "zonas_ocultas": 0,
         "competidores": res["competidores"], "n_competidores": len(res["competidores"]),
-        "hex_m": res["radio_busq_m"], "llamadas": res["llamadas"],
+        "hex_m": res["radio_busq_m"], "llamadas": res["llamadas"], "nodos": res.get("nodos", []),
+        "inv_min": TIPOS_NEGOCIO[zr["tipo"]].get("inversion_min"), "inv_max": TIPOS_NEGOCIO[zr["tipo"]].get("inversion_max"),
         "agente": _parsear_agente_zona(zr["agente_txt"]),
     }
 
@@ -6637,18 +6798,20 @@ def zona_resultados(agent, mapc, tier_key, idioma):
                     unsafe_allow_html=True)
         st.markdown(bloque_ruta([
             (f"Ubiqué {zr['ref']}", True),
-            (f"Dividí {zr['radio_km']} km en {len(data['celdas'])} zonas", True),
-            (f"Encontré {data['n_competidores']} competidores (Google)", True),
-            (f"Detallé las {len(zonas)} mejores con INEGI y tipo de calle", True),
+            (f"Dividí {zr['radio_km']} km a la redonda en {len(data['celdas'])} zonas", True),
+            (f"Encontré {data['n_competidores']} negocios como el tuyo (Google)", True),
+            ("Revisé dónde vive la gente", True),
+            (f"Revisé a fondo las {len(zonas)} mejores", True),
+            (f"Marqué {len(data['nodos'])} lugar{'es' if len(data['nodos']) != 1 else ''} donde se junta la competencia", True),
             ("Comparé y elegí la mejor", True),
         ]), unsafe_allow_html=True)
         st.markdown(bloque_agente_zonas(data), unsafe_allow_html=True)
         if zonas:
             st.markdown("<p style='font-size:13px;font-weight:600;color:#13243B;margin:8px 0 4px'>"
-                        "Revisar una zona a fondo</p>", unsafe_allow_html=True)
+                        "¿Te interesa una? Revísala a fondo</p>", unsafe_allow_html=True)
             for i, z in enumerate(zonas[:6]):
                 with st.container(key=f"chip_val_{i}"):
-                    st.button(f"{i+1}. {z['nombre'][:40]} · {z['score']}", key=f"val_zona_{i}",
+                    st.button(f"{i+1}. {z['nombre'][:40]} · {z['score']}/100", key=f"val_zona_{i}",
                               on_click=_validar_zona_cb, args=(z, zr["tipo"], tier_key))
         render_chat(claude, data, tier_key, idioma)
         with st.expander("📥 Descargar"):
@@ -6707,9 +6870,9 @@ _MODOS_TIER = {
     "premium2": ["validar", "recomendar", "zona_potencial"],
 }
 _MODO_LABEL = {
-    "validar":        ("✅", "Validar mi idea", "¿Funciona mi giro en esta dirección?"),
-    "recomendar":     ("🎯", "Descubrir negocio", "¿Qué giro conviene en esta dirección?"),
-    "zona_potencial": ("🗺️", "Descubrir zona", "¿En qué parte de la ciudad abro?"),
+    "validar":        ("✅", "Validar mi idea", "¿Me irá bien con mi negocio en esta dirección?"),
+    "recomendar":     ("🎯", "Descubrir negocio", "¿Qué negocio me conviene poner aquí?"),
+    "zona_potencial": ("🗺️", "Descubrir zona", "¿En qué parte de la ciudad me conviene abrir?"),
 }
 _PLAN_MODO = {"recomendar": "Básico", "zona_potencial": "PRO"}
 
@@ -6827,7 +6990,7 @@ tipo_negocio_seleccionado = None
 if _vista == "inicio":
     with _agent:
         if modo == "validar":
-            tipo_negocio_seleccionado = st.selectbox("Tu giro", options=list(TIPOS_NEGOCIO.keys()), key="tipo_validar",
+            tipo_negocio_seleccionado = st.selectbox("¿Qué negocio quieres abrir?", options=list(TIPOS_NEGOCIO.keys()), key="tipo_validar",
                                                       format_func=lambda x: TIPOS_NEGOCIO[x]["nombre"])
 
 if _vista == "inicio":
@@ -7014,10 +7177,10 @@ if _vista == "inicio":
             _radio_default = radio_efectivo_analisis(None, tipo_plaza)
             _radio_opciones = {"free": [500], "basic": [300, 500, 600, 800, 1000]}.get(
                 tier_key, [300, 500, 600, 800, 1000, 1500, 2000])
-            st.markdown("**📏 Radio de análisis de competencia**")
+            st.markdown("**📏 ¿Qué tan lejos busco a tu competencia?**")
             if len(_radio_opciones) == 1:
                 st.session_state["radio_analisis"] = None
-                st.caption(f"Radio fijo de {_radio_default} m · 🔒 Elegir radio (300–1,000 m) disponible desde plan Básico")
+                st.caption(f"Busco a {_radio_default} m a la redonda. 🔒 Con el plan Básico puedes elegir de 300 a 1,000 m.")
             else:
                 if _radio_default not in _radio_opciones:
                     _radio_default = 500
@@ -7025,12 +7188,11 @@ if _vista == "inicio":
                     "Radio de análisis", options=_radio_opciones, value=_radio_default,
                     format_func=lambda x: f"{x:,} m", key=f"radio_slider_{tier_key}", label_visibility="collapsed")
                 _r_sel = st.session_state["radio_analisis"]
-                _tip_radio = ("zona de influencia peatonal inmediata" if _r_sel <= 400 else
-                              "radio estándar de tienda de barrio / paso" if _r_sel <= 600 else
-                              "radio de negocio mixto o de destino" if _r_sel <= 1000 else
-                              "radio de destino (el cliente llega en auto)")
-                st.caption(f"{_r_sel:,} m — {_tip_radio}. El score se normaliza por área, así que un radio mayor no te castiga solo por abarcar más. "
-                           "Google devuelve máximo 20 competidores por búsqueda (los más cercanos).")
+                _tip_radio = ("lo que se camina en unos 5 minutos" if _r_sel <= 400 else
+                              "lo normal para un negocio de barrio" if _r_sel <= 600 else
+                              "para negocios a los que la gente va a propósito" if _r_sel <= 1000 else
+                              "para negocios a los que se llega en auto")
+                st.caption(f"{_r_sel:,} m: {_tip_radio}. Buscar más lejos no te baja la calificación por sí solo.")
 
             # ── FLUJO DE ACCESO Y ESTACIONAMIENTO ────────────────────────────────────────
             st.markdown("**¿Cómo llegan principalmente los clientes a esta zona?**")
@@ -7212,7 +7374,7 @@ with _agent:
                     rec["score"] = max(0, min(100, rec["score"]))
                 # Reordenar después del ajuste vehicular (puede cambiar el ranking)
                 if recomendaciones:
-                    recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
+                    recomendaciones.sort(key=lambda x: (x["score"], x.get("_desempate", 0)), reverse=True)
                 competidores = recomendaciones[0]["competidores"] if recomendaciones else []
                 score        = recomendaciones[0]["score"] if recomendaciones else 0
                 desglose     = recomendaciones[0]["desglose"] if recomendaciones else {}
@@ -7229,7 +7391,7 @@ with _agent:
                                 _tipo_plaza, _zona_mall, _renta_mall, "sin_ancla"
                             )
                             rec["score"] = max(0, min(100, rec["score"]))
-                        recomendaciones.sort(key=lambda x: (x["score"], x.get("indice", 0)), reverse=True)
+                        recomendaciones.sort(key=lambda x: (x["score"], x.get("_desempate", 0)), reverse=True)
                     elif _tipo_plaza == "strip_center":
                         contexto["tipo_zona"] = "comercial"
                         contexto["badges"].append("🏪 Strip Center")
