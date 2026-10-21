@@ -330,7 +330,6 @@ h3,h4,.num{font-family:Montserrat,sans-serif;color:var(--navy)}
 button{font:inherit;color:inherit;cursor:pointer}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 #map{position:absolute;inset:0}
-.leaflet-tile-pane{filter:grayscale(.85) contrast(.92) brightness(1.05)}
 .leaflet-popup-content{font:13px 'IBM Plex Sans',sans-serif;margin:10px 12px}
 .chips{position:absolute;top:14px;left:14px;right:70px;z-index:500;display:flex;gap:6px;flex-wrap:wrap}
 .chip{border:1px solid var(--line);background:rgba(255,255,255,.97);border-radius:99px;padding:6px 12px;font-size:12.5px;font-weight:500;display:flex;gap:7px;align-items:center;box-shadow:0 1px 4px rgba(19,36,59,.06)}
@@ -430,11 +429,17 @@ button{font:inherit;color:inherit;cursor:pointer}
 </style>
 <script>
 function addBase(m){
-  const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+  /* Mapa base Esri (gris claro + nombres de calles): funciona dentro de la app y también en el
+     archivo descargado. OpenStreetMap exige una dirección web de origen y desde un archivo
+     abierto en la computadora responde con imágenes de error. OSM queda solo como respaldo. */
+  const opt={maxZoom:19,attribution:'Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap'};
+  const base=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',opt);
+  if(!m.getPane('etiquetas')){const pn=m.createPane('etiquetas');pn.style.zIndex=450;pn.style.pointerEvents='none';}
+  const ref=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,pane:'etiquetas'});
   let errs=0,swapped=false;
-  osm.on('tileerror',()=>{ if(swapped||++errs<4) return; swapped=true; m.removeLayer(osm);
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(m); });
-  osm.addTo(m);
+  base.on('tileerror',()=>{ if(swapped||++errs<4) return; swapped=true; m.removeLayer(base); m.removeLayer(ref);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m); });
+  base.addTo(m); ref.addTo(m);
 }
 const $=id=>document.getElementById(id);
 const fmt=n=>(n==null||isNaN(n))?'—':Number(n).toLocaleString('es-MX',{maximumFractionDigits:0});
