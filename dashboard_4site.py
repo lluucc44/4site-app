@@ -146,15 +146,20 @@ _HTML = r"""<!doctype html>
 <script>
 /* Mapa base sin API key: OpenStreetMap en gris; si falla, Esri World Street Map */
 function addBase(m){
-  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
-  let errs = 0, swapped = false;
-  osm.on('tileerror',()=>{ if (swapped || ++errs < 4) return; swapped = true; m.removeLayer(osm);
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(m); });
-  osm.addTo(m);
+  /* Mapa base Esri (gris claro + nombres de calles): funciona dentro de la app y también en el
+     archivo descargado. OpenStreetMap exige una dirección web de origen y desde un archivo
+     abierto en la computadora responde con imágenes de error. OSM queda solo como respaldo. */
+  const opt={maxZoom:19,attribution:'Tiles © Esri — Esri, HERE, Garmin, © OpenStreetMap'};
+  const base=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',opt);
+  if(!m.getPane('etiquetas')){const pn=m.createPane('etiquetas');pn.style.zIndex=450;pn.style.pointerEvents='none';}
+  const ref=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,pane:'etiquetas'});
+  let errs=0,swapped=false;
+  base.on('tileerror',()=>{ if(swapped||++errs<4) return; swapped=true; m.removeLayer(base); m.removeLayer(ref);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(m); });
+  base.addTo(m); ref.addTo(m);
 }
 </script>
 <style>
-.leaflet-tile-pane{filter:grayscale(.9) contrast(.9) brightness(1.06)}
 :root{
   --navy:#13243B; --blue:#2A6FDB; --blue-2:#1F5FC2; --bg:#F3F5F9; --card:#FFFFFF;
   --line:#E3E8EF; --muted:#5C6B7A; --faint:#8C99A8; --green:#1F9D57; --amber:#D98A1F; --red:#E0524A;
